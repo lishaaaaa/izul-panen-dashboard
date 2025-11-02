@@ -1,0 +1,12 @@
+# venv & cache
+.venv/
+__pycache__/
+*.pyc
+
+# secrets
+.env
+service_account.json
+
+# OS/editor
+.DS_Store
+*.log

@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Dashboard Panen</title>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <h2>Dashboard Panen</h2>
+    <a href="/logout" class="pill" style="text-decoration:none">Logout</a>
+  </header>
+
+  <!-- ====== FILTER HARIAN ====== -->
+  <div class="controls">
+    <label for="datePick" style="margin-right:8px;">Tanggal</label>
+    <select id="datePick"></select>
+  </div>
+
+  <!-- RINGKASAN -->
+  <div id="ringkasan" class="row"></div>
+
+  <!-- TABEL PER-SEKSI -->
+  <div id="tables"></div>
+
+  <hr/>
+
+  <!-- ====== KONTROL GRAFIK BULAN & TAHUN ====== -->
+  <h3>Grafik per Seksi (Bulanan & Tahunan)</h3>
+  <div class="controls" style="gap:12px;display:flex;flex-wrap:wrap;align-items:center">
+    <div>
+      <label style="margin-right:6px;">Bulan</label>
+      <select id="month"></select>
+    </div>
+    <div>
+      <label style="margin-right:6px;">Tahun (Bulanan)</label>
+      <select id="year-month"></select>
+    </div>
+    <div style="margin-left:12px">
+      <label style="margin-right:6px;">Tahun (Tahunan)</label>
+      <select id="year-only"></select>
+    </div>
+  </div>
+
+  <!-- KANVAS GRAFIK -->
+  <div id="charts" class="grid" style="margin-top:8px;"></div>
+
+<script>
+/* Konstanta dari server */
+const SECTIONS = {{ sections|tojson }};
+let charts = {};
+
+/* ====== UTIL ====== */
+function fmt(n){ return (Number(n)||0).toLocaleString('id-ID'); }
+
+/* ====== INIT ====== */
+loadDates();
+
+/* ====== DATA LOADER ====== */
+async function loadDates(){
+  const r = await fetch('/api/dates');
+  const dates = await r.json();
+  const sel = document.getElementById('datePick');
+  sel.innerHTML = '';
+  dates.forEach(d=>{
+    const o = document.createElement('option');
+    o.value = d;
+    o.textContent = d; // sudah pakai kolom "Hari Tanggal Hari ini"
+    sel.appendChild(o);
+  });
+  if(dates.length){
+    sel.value = dates[dates.length-1]; // default: tanggal terakhir
+  }
+  sel.onchange = refresh;
+  await loadYearMonthSelectors();
+  await refresh();
+}
+
+async function loadYearMonthSelectors(){
+  const years = await (await fetch('/api/years')).json();
+  const yearMonthSel = document.getElementById('year-month');
+  const yearOnlySel  = document.getElementById('year-only');
+
+  yearMonthSel.innerHTML = '';
+  yearOnlySel.innerHTML  = '';
+  years.forEach(y=>{
+    const o1 = document.createElement('option'); o1.value=y; o1.textContent=y; yearMonthSel.appendChild(o1);
+    const o2 = document.createElement('option'); o2.value=y; o2.textContent=y; yearOnlySel.appendChild(o2);
+  });
+
+  await refreshMonthsFor(yearMonthSel.value);
+
+  yearMonthSel.onchange = async ()=>{
+    await refreshMonthsFor(yearMonthSel.value);
+    await drawAllCharts();
+  };
+  document.getElementById('month').onchange = drawAllCharts;
+  yearOnlySel.onchange = drawAllCharts;
+}
+
+async function refreshMonthsFor(year){
+  const months = await (await fetch('/api/months?year='+encodeURIComponent(year))).json();
+  const monSel = document.getElementById('month');
+  monSel.innerHTML = '';
+  months.forEach(m=>{
+    const o = document.createElement('option');
+    o.value = m; o.textContent = m; // 1..12
+    monSel.appendChild(o);
+  });
+}
+
+/* ====== TABEL & RINGKASAN ====== */
+function makeTable(seksi, rows, total){
+  let html = `
+    <h4>Seksi ${seksi}</h4>
+    <table class="table">
+      <thead><tr><th>Nama Pemanen</th><th class="num">Jumlah Janjang</th></tr></thead>
+      <tbody>`;
+  rows.forEach(r=>{
+    html += `<tr><td>${r.nama || '-'}</td><td class="num">${fmt(r.janjang)}</td></tr>`;
+  });
+  const tot = total != null ? total : rows.reduce((a,b)=>a+(Number(b.janjang)||0),0);
+  html += `</tbody>
+      <tfoot><tr><th style="text-align:right">Total</th><th class="num">${fmt(tot)}</th></tr></tfoot>
+    </table>`;
+  return html;
+}
+
+async function refresh(){
+  const d = document.getElementById('datePick').value;
+  const r = await fetch('/api/panen?date='+encodeURIComponent(d));
+  const data = await r.json();
+
+  const ring = document.getElementById('ringkasan');
+  ring.innerHTML = `<div class="pill total">Total Tanggal Ini: <b>${fmt(data.grand_total||0)}</b></div>` +
+    SECTIONS.map(s=>`<div class="pill"><b>${s}</b>: ${fmt(data.totals[s]||0)}</div>`).join('');
+
+  const holder = document.getElementById('tables');
+  holder.innerHTML = '';
+  SECTIONS.forEach(s=>{
+    const wrap = document.createElement('div');
+    wrap.innerHTML = makeTable(s, data.groups[s]||[], data.totals[s]||0);
+    holder.appendChild(wrap);
+  });
+
+  await drawAllCharts();
+}
+
+/* ====== GRAFIK ====== */
+async function drawAllCharts(){
+  const yearForMonth = document.getElementById('year-month').value;
+  const monthSel     = document.getElementById('month').value;
+  const yearOnly     = document.getElementById('year-only').value;
+
+  const ch = document.getElementById('charts');
+  ch.innerHTML = '';
+  for (const s of SECTIONS){
+    const idM = `c_${s.replace(/\s+/g,'_')}_mon`;
+    const idY = `c_${s.replace(/\s+/g,'_')}_yr`;
+    const box = document.createElement('div'); 
+    box.className = 'chartbox';
+    box.innerHTML = `
+      <h4>Seksi ${s}</h4>
+      <div class="chartrow">
+        <div>
+          <canvas id="${idM}"></canvas>
+          <div class="caption">Bulanan (${yearForMonth}-${String(monthSel).padStart(2,'0')})</div>
+        </div>
+        <div>
+          <canvas id="${idY}"></canvas>
+          <div class="caption">Tahunan (${yearOnly})</div>
+        </div>
+      </div>`;
+    ch.appendChild(box);
+
+    await drawChartMonth(idM, s, yearForMonth, monthSel);
+    await drawChartYear(idY, s, yearOnly);
+  }
+}
+
+async function drawChartMonth(canvasId, seksi, year, month){
+  const res = await fetch(`/api/series_month?seksi=${encodeURIComponent(seksi)}&year=${year}&month=${month}`);
+  const js = await res.json();
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  if (charts[canvasId]) charts[canvasId].destroy();
+  charts[canvasId] = new Chart(ctx, {
+    type: 'line',
+    data: { labels: js.labels, datasets: [{ label: 'Total Janjang / Hari', data: js.data, fill: true }]},
+    options: { responsive: true, scales: { y: { beginAtZero: true }}, plugins: { legend: { display: false } } }
+  });
+}
+
+async function drawChartYear(canvasId, seksi, year){
+  const res = await fetch(`/api/series_year?seksi=${encodeURIComponent(seksi)}&year=${year}`);
+  const js = await res.json();
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  if (charts[canvasId]) charts[canvasId].destroy();
+  charts[canvasId] = new Chart(ctx, {
+    type: 'line',
+    data: { labels: js.labels, datasets: [{ label: 'Total Janjang / Bulan', data: js.data, fill: true }]},
+    options: { responsive: true, scales: { y: { beginAtZero: true }}, plugins: { legend: { display: false } } }
+  });
+}
+</script>
+</body>
+</html>
