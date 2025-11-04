@@ -6,7 +6,6 @@
     }
   },
   "routes": [
-    { "src": "^/api/ping$", "dest": "/api/ping.py" },
     { "src": "^(?!/api/).*", "dest": "/api/index.py" }
   ]
 }
