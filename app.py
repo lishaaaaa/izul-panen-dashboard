@@ -1,15 +1,52 @@
 # app.py
 import os
-from flask import Flask, jsonify, request, session
+from flask import Flask, jsonify, request, session, redirect
 
+# ====== Flask app (WSGI) ======
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret-change-me")
+
 APP_USER = os.getenv("APP_USER", "admin")
 APP_PASS = os.getenv("APP_PASS", "admin")
 
-def logged_in():
+# ====== Helper auth ======
+def logged_in() -> bool:
     return session.get("auth") is True
 
+# ====== Basic pages ======
+@app.get("/")
+def home():
+    if not logged_in():
+        return (
+            "<h3>Izul Panen Dashboard</h3>"
+            "<p>Login via <code>POST /login</code> "
+            "dengan JSON/form {username, password}.</p>"
+            "<p>Debug: <a href='/health'>/health</a>, "
+            "<a href='/test'>/test</a>, "
+            "<a href='/diag_env'>/diag_env</a>, "
+            "<a href='/diag_sheets'>/diag_sheets</a></p>",
+            200,
+            {"Content-Type": "text/html; charset=utf-8"},
+        )
+    return (
+        "<h3>Logged in ✅</h3>"
+        "<ul>"
+        "<li><a href='/health'>/health</a></li>"
+        "<li><a href='/test'>/test</a></li>"
+        "<li><a href='/diag_env'>/diag_env</a></li>"
+        "<li><a href='/diag_sheets'>/diag_sheets</a></li>"
+        "<li><a href='/api/dates'>/api/dates</a></li>"
+        "</ul>",
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+    )
+
+# favicon biar browser gak bikin 500 di /favicon.ico
+@app.get("/favicon.ico")
+def favicon():
+    return redirect("/vercel.svg", code=307)
+
+# ====== Auth endpoints ======
 @app.post("/login")
 def login():
     data = request.get_json(silent=True) or request.form
@@ -25,49 +62,45 @@ def logout():
     session.clear()
     return jsonify({"ok": True})
 
-@app.get("/")
-def home():
-    return (
-        "<h3>Izul Panen Dashboard</h3>"
-        "<p>/test (alive), /health (ok), /diag_env, /diag_sheets</p>", 200,
-        {"Content-Type":"text/html; charset=utf-8"}
-    )
-
-# ---------- NO.3: endpoint diagnosa ----------
-@app.get("/test")
-def test_alive():
-    return "alive", 200
-
+# ====== NO.3: Diagnostik & health ======
 @app.get("/health")
 def health():
     return "ok", 200
 
+@app.get("/test")
+def test_alive():
+    return "alive", 200
+
 @app.get("/diag_env")
 def diag_env():
     keys = [
-        "SHEET_ID","SHEET_TAB","COL_TANGGAL","COL_SEKSI",
-        "DATE_ORDER","GOOGLE_APPLICATION_CREDENTIALS"
+        "SHEET_ID", "SHEET_TAB", "COL_TANGGAL", "COL_SEKSI",
+        "DATE_ORDER", "GOOGLE_APPLICATION_CREDENTIALS"
     ]
     out = {}
     for k in keys:
         v = os.getenv(k, "")
-        out[k] = (v if len(v) <= 140 else (v[:60] + "..." + v[-20:]))
+        out[k] = v if len(v) <= 140 else (v[:60] + "..." + v[-20:])
     return jsonify(out), 200
 
 @app.get("/diag_sheets")
 def diag_sheets():
-    # import DI DALAM endpoint (safe-mode, supaya import error tidak crash saat start)
     try:
+        # lazy import supaya app tetap hidup walau ENV belum beres
         from sheets_io import _client, SHEET_ID
         gc = _client()
         sh = gc.open_by_key(SHEET_ID)
         titles = [ws.title for ws in sh.worksheets()]
-        return jsonify({"ok": True, "spreadsheet_title": sh.title, "worksheets": titles}), 200
+        return jsonify({
+            "ok": True,
+            "spreadsheet_title": sh.title,
+            "worksheets": titles
+        }), 200
     except Exception as e:
         import traceback
         return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
 
-# ---------- API data (import di dalam tiap route) ----------
+# ====== API data untuk dashboard ======
 @app.get("/api/dates")
 def api_dates():
     try:
@@ -122,6 +155,6 @@ def api_series_year():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# run lokal (Vercel abaikan)
+# ====== Run lokal saja (Vercel mengabaikan ini) ======
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
