@@ -6,12 +6,7 @@
   "functions": {
     "api/index.py": {
       "runtime": "vercel-python@0.6.2",
-      "includeFiles": [
-        "templates/**",
-        "static/**",
-        "app.py",
-        "sheets_io.py"
-      ]
+      "includeFiles": "templates/**,static/**,app.py,sheets_io.py"
     }
   }
 }
