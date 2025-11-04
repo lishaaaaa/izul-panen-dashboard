@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{{ title or "Izul Panen" }}</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
+    header { display:flex; gap:12px; align-items:center; margin-bottom:16px; }
+    button, select, input { padding:8px 10px; }
+    .grid { display:grid; gap:16px; grid-template-columns: repeat(12, 1fr); }
+    .card { border:1px solid #ddd; border-radius:12px; padding:16px; background:#fff; }
+    .span-4 { grid-column: span 4; } .span-8 { grid-column: span 8; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom:1px solid #eee; padding:8px; text-align:left; }
+  </style>
+</head>
+<body>
+  <header>
+    <h2 style="margin:0;">Izul Panen Dashboard</h2>
+    <a href="/health">health</a>
+    <a href="/test">test</a>
+    <a href="/diag_sheets">diag_sheets</a>
+    <form id="logoutForm" style="margin-left:auto" method="post" action="/logout">
+      <button type="submit">Logout</button>
+    </form>
+  </header>
+  {% block content %}{% endblock %}
+  <script src="/static/app.js"></script>
+</body>
+</html>
