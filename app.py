@@ -103,6 +103,9 @@ def api_series_year():
     if not (seksi and y): return jsonify({"error":"need ?seksi=&year="}), 400
     labels, data = series_year(seksi, y)
     return jsonify({"labels":labels, "data":data})
+    
+@app.get("/health")
+def health(): return "ok", 200
 
 if __name__ == "__main__":
     app.run(debug=True)
