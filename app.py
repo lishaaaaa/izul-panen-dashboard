@@ -107,5 +107,25 @@ def api_series_year():
 @app.get("/health")
 def health(): return "ok", 200
 
+from sheets_io import _client, SHEET_ID, SHEET_TAB
+
+@app.get("/diag")
+def diag():
+    try:
+        gc = _client()
+        sh = gc.open_by_key(SHEET_ID)
+        ws = sh.worksheet(SHEET_TAB)
+        info = {
+            "ok": True,
+            "spreadsheet_title": sh.title,
+            "worksheet_title": ws.title,
+            "rows": ws.row_count,
+            "cols": ws.col_count,
+        }
+        return info, 200
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()}, 500
+
 if __name__ == "__main__":
     app.run(debug=True)
