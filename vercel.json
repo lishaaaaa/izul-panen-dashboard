@@ -1,5 +1,4 @@
 {
-  "functions": { "api/**/*.py": { "runtime": "python3.11" } },
   "routes": [
     { "src": "^/api/ping$", "dest": "/api/ping.py" },
     { "src": "/.*", "dest": "/api/index" }
