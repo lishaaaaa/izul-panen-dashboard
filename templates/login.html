@@ -1,28 +1,23 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Login Dashboard Panen</title>
-  <link rel="stylesheet" href="/static/style.css"/>
-  <style>
-    .login {max-width:380px;margin:80px auto;padding:24px;border:1px solid #eee;border-radius:16px}
-    .login h2{margin:0 0 12px}
-    .login input{width:100%;padding:10px;margin:6px 0;border:1px solid #ddd;border-radius:10px}
-    .login button{padding:10px 14px;border:0;border-radius:10px;cursor:pointer}
-  </style>
-</head>
-<body>
-  <div class="login">
-    <h2>Login</h2>
-    {% if error %}<div class="pill" style="border-color:#f4c2c2;background:#ffecec;color:#b00">{{error}}</div>{% endif %}
-    <form method="post">
-      <label>Username</label>
-      <input name="username" required>
-      <label>Password</label>
-      <input name="password" type="password" required>
-      <button type="submit">Masuk</button>
-    </form>
-  </div>
-</body>
-</html>
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width:420px">
+  <h3>Login</h3>
+  <form id="loginForm">
+    <div><label>Username</label><br/><input name="username" required/></div>
+    <div style="margin-top:8px"><label>Password</label><br/><input type="password" name="password" required/></div>
+    <button style="margin-top:12px">Masuk</button>
+  </form>
+  <p id="loginMsg" style="color:#d33;margin-top:10px"></p>
+</div>
+<script>
+document.getElementById('loginForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const res = await fetch('/login', {method:'POST', body:fd});
+  const j = await res.json();
+  if(j.ok){ location.href='/dashboard'; } else {
+    document.getElementById('loginMsg').textContent = j.error || 'Gagal login';
+  }
+});
+</script>
+{% endblock %}
