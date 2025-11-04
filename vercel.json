@@ -1,12 +1,11 @@
 {
   "functions": {
     "api/index.py": {
-      "runtime": "@vercel/python@4.0.0",
-      "pythonVersion": "3.12.x",
       "includeFiles": "templates/**,static/**,app.py,sheets_io.py"
     }
   },
   "routes": [
-    { "src": "^(?!/api/).*", "dest": "/api/index.py" }
+    { "src": "^/api/ping$", "dest": "api/ping.py" },
+    { "src": "^(?!/api/).*", "dest": "api/index.py" }
   ]
 }
