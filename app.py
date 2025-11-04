@@ -1,26 +1,28 @@
 # app.py
 import os
-from flask import Flask, jsonify, request, session, redirect
+from flask import (
+    Flask, jsonify, request, session, redirect, render_template
+)
 
-# ====== Flask app (WSGI) ======
+# ===================== Flask App =====================
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret-change-me")
 
 APP_USER = os.getenv("APP_USER", "admin")
 APP_PASS = os.getenv("APP_PASS", "admin")
 
-# ====== Helper auth ======
 def logged_in() -> bool:
     return session.get("auth") is True
 
-# ====== Basic pages ======
+
+# ===================== Pages =====================
 @app.get("/")
 def home():
     if not logged_in():
         return (
             "<h3>Izul Panen Dashboard</h3>"
-            "<p>Login via <code>POST /login</code> "
-            "dengan JSON/form {username, password}.</p>"
+            "<p>Login via <code>POST /login</code> (JSON/form {username, password}) "
+            "atau buka <a href='/login-page'>/login-page</a>.</p>"
             "<p>Debug: <a href='/health'>/health</a>, "
             "<a href='/test'>/test</a>, "
             "<a href='/diag_env'>/diag_env</a>, "
@@ -28,25 +30,25 @@ def home():
             200,
             {"Content-Type": "text/html; charset=utf-8"},
         )
-    return (
-        "<h3>Logged in ✅</h3>"
-        "<ul>"
-        "<li><a href='/health'>/health</a></li>"
-        "<li><a href='/test'>/test</a></li>"
-        "<li><a href='/diag_env'>/diag_env</a></li>"
-        "<li><a href='/diag_sheets'>/diag_sheets</a></li>"
-        "<li><a href='/api/dates'>/api/dates</a></li>"
-        "</ul>",
-        200,
-        {"Content-Type": "text/html; charset=utf-8"},
-    )
+    return redirect("/dashboard", code=302)
 
-# favicon biar browser gak bikin 500 di /favicon.ico
+# favicon supaya browser nggak memicu 500
 @app.get("/favicon.ico")
 def favicon():
     return redirect("/vercel.svg", code=307)
 
-# ====== Auth endpoints ======
+@app.get("/login-page")
+def login_page():
+    return render_template("login.html", title="Login")
+
+@app.get("/dashboard")
+def dashboard():
+    if not logged_in():
+        return render_template("login.html", title="Login"), 401
+    return render_template("dashboard.html", title="Dashboard")
+
+
+# ===================== Auth =====================
 @app.post("/login")
 def login():
     data = request.get_json(silent=True) or request.form
@@ -62,7 +64,8 @@ def logout():
     session.clear()
     return jsonify({"ok": True})
 
-# ====== NO.3: Diagnostik & health ======
+
+# ===================== Health / Diag =====================
 @app.get("/health")
 def health():
     return "ok", 200
@@ -86,21 +89,18 @@ def diag_env():
 @app.get("/diag_sheets")
 def diag_sheets():
     try:
-        # lazy import supaya app tetap hidup walau ENV belum beres
+        # lazy import → kalau ENV salah, halaman lain tetap hidup
         from sheets_io import _client, SHEET_ID
         gc = _client()
         sh = gc.open_by_key(SHEET_ID)
         titles = [ws.title for ws in sh.worksheets()]
-        return jsonify({
-            "ok": True,
-            "spreadsheet_title": sh.title,
-            "worksheets": titles
-        }), 200
+        return jsonify({"ok": True, "spreadsheet_title": sh.title, "worksheets": titles}), 200
     except Exception as e:
         import traceback
         return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
 
-# ====== API data untuk dashboard ======
+
+# ===================== API (dipakai dashboard) =====================
 @app.get("/api/dates")
 def api_dates():
     try:
@@ -155,6 +155,7 @@ def api_series_year():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# ====== Run lokal saja (Vercel mengabaikan ini) ======
+
+# ===================== Run lokal saja =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
