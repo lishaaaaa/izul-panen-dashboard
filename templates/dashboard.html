@@ -1,63 +1,162 @@
-{% extends "base.html" %}
-{% block content %}
-<div class="grid">
-
-  <!-- HEADER + FILTER -->
-  <div class="card span-12">
-    <h2 style="margin:0 0 10px">Izul Panen Dashboard</h2>
-
-    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">
-      <div>
-        <label><b>Tanggal</b></label><br/>
-        <select id="dateSelect"></select>
-      </div>
-      <button id="btnLoad">Tampilkan</button>
-
-      <div id="badges" style="display:flex;gap:8px;flex-wrap:wrap;margin-left:auto"></div>
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <title>Izul Panen Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="/static/favicon.ico">
+  <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@2/css/pico.min.css">
+  <style>
+    :root { --gap: 16px }
+    body { background:#fff; }
+    .wrap { max-width: 1280px; margin: 24px auto; padding: 0 16px; }
+    .topbar { display:flex; align-items:center; gap:12px; }
+    .spacer { flex:1 }
+    .chip { display:inline-flex; align-items:center; gap:8px; border:1px solid #e5e7eb; padding:6px 10px; border-radius:999px; font-size:.9rem }
+    .grid-3 { display:grid; grid-template-columns: 280px 1fr auto; gap: var(--gap); align-items: start; }
+    .panel { border:1px solid #e5e7eb; border-radius:14px; padding:14px; background:#fff }
+    .panel h4 { margin:4px 0 10px }
+    table { width:100%; border-collapse:collapse }
+    th,td { border-bottom:1px solid #f0f2f5; padding:10px 8px }
+    th { background:#fafafa; font-weight:600 }
+    tfoot td { font-weight:700 }
+    .charts { margin-top: 22px; }
+    .charts h4 { margin: 0 0 10px }
+    .charts .grid { display:grid; grid-template-columns: 1fr 1fr; gap: var(--gap) }
+    .chartbox { border:1px solid #e5e7eb; border-radius:14px; padding:12px; height: 300px; }
+    .controls { display:grid; grid-template-columns: 90px 120px 120px auto; gap:10px; align-items:center; margin: 6px 0 14px }
+    .logout { border-radius: 999px; }
+    /* kecilkan scrollbar halaman dashboard panjang */
+    html { scroll-behavior:smooth }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <h3 style="margin:0;">Dashboard Panen</h3>
+      <nav style="margin-left:10px">
+        <a href="/health">health</a>
+        <a href="/test">test</a>
+        <a href="/diag_sheets">diag_sheets</a>
+      </nav>
+      <div class="spacer"></div>
+      <form action="/logout" method="post">
+        <button class="secondary logout" type="submit">Logout</button>
+      </form>
     </div>
+
+    <!-- GRID KIRI FILTER – KANAN TABEL SEKSI – KANAN KOSONG (supaya komposisi mirip versi lama) -->
+    <section class="grid-3" style="margin-top:16px">
+      <!-- kiri -->
+      <div class="panel">
+        <h4>Dashboard Panen</h4>
+        <label for="tanggal">Tanggal</label>
+        <input id="tanggal" type="date">
+        <button id="btn-apply" class="secondary" style="margin-top:8px">Tampilkan</button>
+
+        <div style="margin:14px 0 6px">
+          <span id="badge-total" class="chip">Total Tanggal Ini: <strong id="total-ttl">0</strong></span>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:8px; margin-top:8px">
+          <span class="chip">A III: <strong id="ttl-a">0</strong></span>
+          <span class="chip">B III: <strong id="ttl-b">0</strong></span>
+          <span class="chip">C II: <strong id="ttl-c">0</strong></span>
+          <span class="chip">D I: <strong id="ttl-d">0</strong></span>
+        </div>
+      </div>
+
+      <!-- tengah: tabel per-seksi -->
+      <div>
+        <div id="tbl-a" class="panel" style="margin-bottom:var(--gap)">
+          <h4>Seksi A III</h4>
+          <table>
+            <thead><tr><th>Nama Pemanen</th><th style="width:180px">Jumlah Janjang</th></tr></thead>
+            <tbody id="tb-a"></tbody>
+            <tfoot><tr><td>Total</td><td id="sum-a">0</td></tr></tfoot>
+          </table>
+        </div>
+
+        <div id="tbl-b" class="panel" style="margin-bottom:var(--gap)">
+          <h4>Seksi B III</h4>
+          <table>
+            <thead><tr><th>Nama Pemanen</th><th>Jumlah Janjang</th></tr></thead>
+            <tbody id="tb-b"></tbody>
+            <tfoot><tr><td>Total</td><td id="sum-b">0</td></tr></tfoot>
+          </table>
+        </div>
+
+        <div id="tbl-c" class="panel" style="margin-bottom:var(--gap)">
+          <h4>Seksi C II</h4>
+          <table>
+            <thead><tr><th>Nama Pemanen</th><th>Jumlah Janjang</th></tr></thead>
+            <tbody id="tb-c"></tbody>
+            <tfoot><tr><td>Total</td><td id="sum-c">0</td></tr></tfoot>
+          </table>
+        </div>
+
+        <div id="tbl-d" class="panel">
+          <h4>Seksi D I</h4>
+          <table>
+            <thead><tr><th>Nama Pemanen</th><th>Jumlah Janjang</th></tr></thead>
+            <tbody id="tb-d"></tbody>
+            <tfoot><tr><td>Total</td><td id="sum-d">0</td></tr></tfoot>
+          </table>
+        </div>
+      </div>
+
+      <!-- kanan (panel grafik + kontrol) -->
+      <div class="panel">
+        <h4>Grafik per Seksi (Bulanan & Tahunan)</h4>
+        <div class="controls">
+          <label for="sel-bulan" style="margin:0">Bulan</label>
+          <select id="sel-bulan"></select>
+          <select id="sel-tahun-bulanan"></select>
+          <div></div>
+          <label for="sel-tahun-tahunan" style="margin:0">Tahun (Tahunan)</label>
+          <select id="sel-tahun-tahunan"></select>
+          <button id="btn-grafik" class="secondary">Tampilkan Grafik</button>
+        </div>
+
+        <!-- A III -->
+        <div class="charts">
+          <h4>Seksi A III</h4>
+          <div class="grid">
+            <div class="chartbox"><canvas id="ch-a-month"></canvas></div>
+            <div class="chartbox"><canvas id="ch-a-year"></canvas></div>
+          </div>
+        </div>
+
+        <!-- B III -->
+        <div class="charts">
+          <h4>Seksi B III</h4>
+          <div class="grid">
+            <div class="chartbox"><canvas id="ch-b-month"></canvas></div>
+            <div class="chartbox"><canvas id="ch-b-year"></canvas></div>
+          </div>
+        </div>
+
+        <!-- C II -->
+        <div class="charts">
+          <h4>Seksi C II</h4>
+          <div class="grid">
+            <div class="chartbox"><canvas id="ch-c-month"></canvas></div>
+            <div class="chartbox"><canvas id="ch-c-year"></canvas></div>
+          </div>
+        </div>
+
+        <!-- D I -->
+        <div class="charts">
+          <h4>Seksi D I</h4>
+          <div class="grid">
+            <div class="chartbox"><canvas id="ch-d-month"></canvas></div>
+            <div class="chartbox"><canvas id="ch-d-year"></canvas></div>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 
-  <!-- TABEL PER SEKSI -->
-  <div id="tablesWrap" class="card span-12"></div>
-
-  <!-- GRAFIK -->
-  <div class="card span-12">
-    <h3 style="margin:0 0 10px">Grafik per Seksi (Bulanan & Tahunan)</h3>
-
-    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
-      <div>
-        <label>Bulan</label><br/>
-        <select id="monthSelect"></select>
-      </div>
-      <div>
-        <label>Tahun (Bulanan)</label><br/>
-        <select id="yearSelectMonth"></select>
-      </div>
-      <div>
-        <label>Tahun (Tahunan)</label><br/>
-        <select id="yearSelectYear"></select>
-      </div>
-      <button id="btnLoadCharts">Tampilkan Grafik</button>
-    </div>
-
-    <div id="chartsWrap" class="grid" style="grid-template-columns:1fr 1fr;gap:22px"></div>
-  </div>
-</div>
-
-<style>
-  .badge {
-    display:inline-block; padding:8px 12px; border-radius:999px;
-    background:#f3f4f6; border:1px solid #e5e7eb; font-weight:600;
-  }
-  .seksi-title { margin:18px 0 8px; font-weight:700; }
-  table { width:100%; border-collapse:collapse }
-  th, td { padding:10px; border-bottom:1px solid #eee; }
-  .total-row td { font-weight:700; }
-  /* bikin kanvas stabil & horizontal bars enak dilihat */
-  .canvas-box { border:1px solid #eee; border-radius:12px; padding:12px; background:#fff; height:320px; }
-  .canvas-box canvas { width:100% !important; height:100% !important; }
-</style>
-
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script defer src="{{ url_for('static', filename='app.js') }}"></script>
-{% endblock %}
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
