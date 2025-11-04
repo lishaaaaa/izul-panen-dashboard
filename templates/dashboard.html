@@ -1,28 +1,60 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="grid">
-  <div class="card span-4">
-    <h4>Filter</h4>
-    <label>Tanggal</label><br/>
-    <select id="dateSelect"></select>
-    <button id="btnLoad" style="margin-top:8px">Tampilkan</button>
-    <hr/>
-    <div><b>Total Per Seksi</b></div>
-    <div id="totals"></div>
-    <div style="margin-top:8px"><b>Grand Total:</b> <span id="grandTotal">0</span></div>
-  </div>
 
-  <div class="card span-8">
-    <h4>Grafik Janjang per Pemanen (hari terpilih)</h4>
-    <canvas id="chart"></canvas>
-  </div>
-
+  <!-- Panel filter & ringkasan -->
   <div class="card span-12">
-    <h4>Detail</h4>
-    <table>
-      <thead><tr><th>Tanggal</th><th>Seksi</th><th>Nama</th><th>Janjang</th></tr></thead>
-      <tbody id="rowsBody"></tbody>
-    </table>
+    <h3 style="margin-top:0">Dashboard Panen</h3>
+
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div>
+        <label><b>Tanggal</b></label><br/>
+        <select id="dateSelect"></select>
+        <button id="btnLoad">Tampilkan</button>
+      </div>
+
+      <div id="badges" style="display:flex;gap:8px;flex-wrap:wrap">
+        <span class="badge" id="badgeTotal">Total Tanggal Ini: 0</span>
+        <!-- badge seksi akan diinject JS -->
+      </div>
+    </div>
   </div>
+
+  <!-- Tabel per seksi (akan dipasang dinamis) -->
+  <div id="tablesWrap" class="card span-12"></div>
+
+  <!-- Grafik per seksi (bulanan & tahunan) -->
+  <div class="card span-12">
+    <h4>Grafik per Seksi (Bulanan & Tahunan)</h4>
+
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+      <div>
+        <label>Bulan</label><br/>
+        <select id="monthSelect"></select>
+      </div>
+      <div>
+        <label>Tahun (Bulanan)</label><br/>
+        <select id="yearSelectMonth"></select>
+      </div>
+      <div>
+        <label>Tahun (Tahunan)</label><br/>
+        <select id="yearSelectYear"></select>
+      </div>
+      <button id="btnLoadCharts">Tampilkan Grafik</button>
+    </div>
+
+    <div id="chartsWrap" class="grid" style="grid-template-columns:1fr 1fr;gap:24px"></div>
+  </div>
+
 </div>
+
+<style>
+.badge {
+  display:inline-block; padding:8px 12px; border-radius:999px;
+  background:#f3f4f6; border:1px solid #e5e7eb; font-weight:600;
+}
+.seksi-title { margin:18px 0 8px; font-weight:700; }
+.total-row td { font-weight:700; }
+.canvas-box { border:1px solid #eee; border-radius:12px; padding:12px; background:#fff; }
+</style>
 {% endblock %}
