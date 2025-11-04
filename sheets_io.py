@@ -1,59 +1,54 @@
 # sheets_io.py
 import os, time
 import gspread
-from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from dateutil import parser as dparser
 from datetime import datetime, timedelta, date
 from calendar import monthrange
 
-load_dotenv()
-
-# ====== KONFIGURASI ENV ======
-# Scopes cukup read-only; tambah Drive read-only bila pakai open_by_url
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
-
-# Path kredensial: di Vercel wajib /tmp; di lokal boleh file biasa
-CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "/tmp/service_account.json"
+# ============= KONFIGURASI ENV =============
+SCOPES     = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/service_account.json")
 JSON_ENV   = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
-SHEET_ID   = os.getenv("SHEET_ID")
-SHEET_TAB  = os.getenv("SHEET_TAB", "Form Responses 1")
+SHEET_ID   = os.getenv("SHEET_ID", "").strip()
+SHEET_TAB  = os.getenv("SHEET_TAB", "Form Responses 1").strip()
 
-# Sumber tanggal & seksi (header persis seperti di sheet)
-COL_TANGGAL = os.getenv("COL_TANGGAL", "Hari Tanggal Hari ini")
-COL_SEKSI   = os.getenv("COL_SEKSI", "Masukkan Lokasi Seksi yang di Input")
+# Nama kolom (header di Google Sheet)
+COL_TANGGAL = os.getenv("COL_TANGGAL", "Hari Tanggal Hari ini").strip()
+COL_SEKSI   = os.getenv("COL_SEKSI", "Masukkan Lokasi Seksi yang di Input").strip()
 
-# Urutan tanggal preferensi: MDY / DMY
+# Preferensi format tanggal: "DMY" (default) atau "MDY"
 DATE_ORDER  = (os.getenv("DATE_ORDER", "DMY") or "DMY").upper()
 
-# Worker list: bisa dari ENV "WORKERS=Agus,Bagol,Herman,..."
-WORKERS_ENV = [w.strip() for w in (os.getenv("WORKERS", "")).split(",") if w.strip()]
-WORKERS = WORKERS_ENV or ["Agus","Bagol","Herman","Keleng","Paeng","Riadi","Supri","Suri","Wagiso"]
+# Daftar pemanen (kolom-kolom berisi angka janjang)
+WORKERS = [
+    "Agus","Bagol","Herman","Keleng","Paeng","Riadi","Supri","Suri","Wagiso"
+]
 
-# Cache sederhana (biar gak spam Google API)
-_cache = {"at": 0, "rows": []}
-TTL = int(os.getenv("CACHE_TTL", "30"))  # detik
+# ============= TULIS KREDENSIAL JSON (jika ada di ENV) =============
+def _ensure_creds_file():
+    """
+    Di Vercel, simpan GOOGLE_CREDENTIALS_JSON ke path CREDS_PATH saat cold start.
+    Aman karena filesystem /tmp bersifat ephemeral per instance.
+    """
+    if JSON_ENV and not os.path.exists(CREDS_PATH):
+        try:
+            os.makedirs(os.path.dirname(CREDS_PATH), exist_ok=True)
+        except Exception:
+            pass
+        with open(CREDS_PATH, "w", encoding="utf-8") as f:
+            f.write(JSON_ENV)
 
-# ====== SIAPKAN KREDENSIAL (ENV → FILE) ======
-if JSON_ENV and not os.path.exists(CREDS_PATH):
-    try:
-        os.makedirs(os.path.dirname(CREDS_PATH), exist_ok=True)
-    except Exception:
-        pass
-    with open(CREDS_PATH, "w", encoding="utf-8") as f:
-        f.write(JSON_ENV)
-
-# ====== UTIL ======
+# ============= KLIEN GSPREAD =============
 def _client():
+    _ensure_creds_file()
     creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
     return gspread.authorize(creds)
 
+# ============= UTIL =============
 def _parse_date(v):
-    """Parse tanggal robust dengan preferensi DATE_ORDER (MDY/DMY)."""
+    """Parse tanggal dengan preferensi DATE_ORDER (DMY/MDY) dan fallback ke dateutil."""
     if isinstance(v, (datetime, date)):
         return datetime.combine(v, datetime.min.time())
 
@@ -61,7 +56,9 @@ def _parse_date(v):
     if not s:
         return None
 
+    # Normalisasi pemisah agar strptime lebih mudah
     s_norm = s.replace("-", "/").strip()
+
     patterns_MDY = ["%m/%d/%Y", "%m/%d/%y"]
     patterns_DMY = ["%d/%m/%Y", "%d/%m/%y"]
     patterns = (patterns_MDY + patterns_DMY) if DATE_ORDER == "MDY" else (patterns_DMY + patterns_MDY)
@@ -89,15 +86,23 @@ def _to_num(v):
     except Exception:
         return None
 
-# ====== LOAD SHEET: format wide → long ======
+# ============= CACHE SEDERHANA =============
+_cache = {"at": 0.0, "rows": []}
+TTL = 30  # detik
+
+# ============= LOAD DATA: wide -> long =============
 def _rows():
     """
-    Baca sheet 'wide' (tiap nama pemanen adalah kolom) → list dict:
+    Baca sheet 'wide' (tiap nama pemanen adalah kolom) -> list of dict:
     {tanggal(datetime), tanggal_str, seksi, nama, janjang(float)}
     """
     now = time.time()
     if now - _cache["at"] < TTL and _cache["rows"]:
         return _cache["rows"]
+
+    if not SHEET_ID:
+        _cache.update(at=now, rows=[])
+        return []
 
     ws = _client().open_by_key(SHEET_ID).worksheet(SHEET_TAB)
     vals = ws.get_all_values()
@@ -110,11 +115,10 @@ def _rows():
         i_tgl   = header.index(COL_TANGGAL)
         i_seksi = header.index(COL_SEKSI)
     except ValueError:
-        # Kolom penting tidak ditemukan
         _cache.update(at=now, rows=[])
         return []
 
-    # deteksi kolom pekerja berdasarkan daftar WORKERS
+    # mapping kolom pekerja
     worker_idx = []
     for i, h in enumerate(header):
         hs = h.strip()
@@ -125,9 +129,8 @@ def _rows():
     for row in vals[1:]:
         if len(row) <= max(i_tgl, i_seksi):
             continue
-
-        tgl_str = row[i_tgl].strip()
-        seksi   = row[i_seksi].strip()
+        tgl_str = (row[i_tgl] if i_tgl < len(row) else "").strip()
+        seksi   = (row[i_seksi] if i_seksi < len(row) else "").strip()
         if not tgl_str or not seksi:
             continue
 
@@ -138,7 +141,7 @@ def _rows():
         for i, wname in worker_idx:
             val = row[i].strip() if i < len(row) else ""
             j = _to_num(val)
-            if j is None:  # kalau mau anggap kosong=0, ganti ke: j = 0.0
+            if j is None:  # kalau mau treat kosong=0, ganti ke: j = 0.0
                 continue
             out.append({
                 "tanggal": tgl,
@@ -152,9 +155,9 @@ def _rows():
     _cache.update(at=now, rows=out)
     return out
 
-# ====== API: Harian ======
+# ============= API (harian) =============
 def list_dates_str():
-    """Daftar tanggal unik (string asal sheet) berurutan kronologis."""
+    """Daftar tanggal unik (string dari Sheet) berurutan kronologis."""
     seen = {}
     for r in _rows():
         s = r["tanggal_str"]
@@ -173,7 +176,7 @@ def totals_per_seksi(rows):
     grand = sum(tot.values())
     return tot, grand
 
-# ====== API: Rolling window (N hari terakhir) ======
+# ============= API (rolling window) =============
 def series_for_section(seksi, end_date, days_window):
     rows = [r for r in _rows() if r["seksi"] == seksi]
     if not rows:
@@ -196,7 +199,7 @@ def series_for_section(seksi, end_date, days_window):
         cur += timedelta(days=1)
     return labels, data
 
-# ====== API: Dropdown Bulan/Tahun + Seri ======
+# ============= API (dropdown bulan/tahun & seri) =============
 def list_years():
     return sorted({ r["tanggal"].year for r in _rows() })
 
