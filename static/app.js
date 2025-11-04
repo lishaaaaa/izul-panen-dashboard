@@ -1,156 +1,87 @@
-/* global Chart */
-const fmt = new Intl.NumberFormat('id-ID');
+(() => {
+  const $ = (q, el=document) => el.querySelector(q);
+  const $$ = (q, el=document) => Array.from(el.querySelectorAll(q));
 
-// ===== helper DOM =====
-const el = (id) => document.getElementById(id);
-const tb = (id) => document.getElementById(id);
+  const bulanSel = $("#bulanSel");
+  const tahunBulananSel = $("#tahunBulananSel");
+  const tahunTahunanSel = $("#tahunTahunanSel");
+  const btn = $("#btnRender");
 
-// ===== endpoints =====
-async function getJSON(url) {
-  const r = await fetch(url, { credentials: 'include' });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  return r.json();
-}
+  let charts = []; // simpan instances Chart.js supaya bisa destroy saat re-render
 
-// ====== TABEL HARIAN ======
-const SEKSI = [
-  { key: 'A III', body: 'tb-a', sum: 'sum-a', pill: 'ttl-a' },
-  { key: 'B III', body: 'tb-b', sum: 'sum-b', pill: 'ttl-b' },
-  { key: 'C II', body: 'tb-c', sum: 'sum-c', pill: 'ttl-c' },
-  { key: 'D I', body: 'tb-d', sum: 'sum-d', pill: 'ttl-d' },
-];
+  function fmtTicksLinear(value){
+    try { return new Intl.NumberFormat('id-ID').format(value); }
+    catch(e) { return value; }
+  }
 
-function fillTable(tbodyId, rows) {
-  const tbody = tb(tbodyId);
-  tbody.innerHTML = '';
-  rows.forEach(r => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${r.nama}</td><td>${fmt.format(r.janjang)}</td>`;
-    tbody.appendChild(tr);
-  });
-}
-
-function sum(rows) {
-  return rows.reduce((s, r) => s + (r.janjang || 0), 0);
-}
-
-async function loadDaily(dateStr) {
-  const data = await getJSON(`/api/daily?date=${encodeURIComponent(dateStr)}`);
-  // data = { by_seksi: { 'A III': [...], ... }, total_all, total_per_seksi }
-  el('total-ttl').textContent = fmt.format(data.total_all || 0);
-
-  SEKSI.forEach(s => {
-    const rows = (data.by_seksi[s.key] || []);
-    fillTable(s.body, rows);
-    tb(s.sum).textContent = fmt.format(sum(rows));
-    el(s.pill).textContent = fmt.format(sum(rows));
-  });
-}
-
-// ====== GRAFIK ======
-const chartRefs = {};
-
-function makeLineConfig(labels, data) {
-  return {
-    type: 'line',
-    data: {
+  function makeLineChart(ctx, labels, values, title){
+    if (ctx._chart){ ctx._chart.destroy(); }
+    const data = {
       labels,
       datasets: [{
         label: 'Janjang',
-        data,
-        fill: true,
-        borderWidth: 2,
-        pointRadius: 2,
-        tension: 0.2
+        data: values,
+        tension: 0.25,
+        fill: true
       }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,               // << anti “gerak-gerak”
-      plugins: {
-        legend: { display: false },
-        tooltip: { intersect: false, mode: 'index' }
-      },
-      scales: {
-        x: { grid: { display: false } },
-        y: { beginAtZero: true }
+    };
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, title: { display: false, text: title } },
+        scales: {
+          y: { ticks: { callback: fmtTicksLinear }, beginAtZero: true }
+        }
+      }
+    });
+    ctx._chart = chart;
+    charts.push(chart);
+  }
+
+  async function fetchSeries({seksi, month, year}){
+    const q = new URLSearchParams({ seksi, month, year });
+    const r = await fetch(`/api/series?${q.toString()}`, { credentials:'same-origin' });
+    if (!r.ok) return { daily: [], monthly: [] };
+    return await r.json();
+  }
+
+  async function renderAll(){
+    const month = parseInt(bulanSel.value, 10);
+    const yBulanan = parseInt(tahunBulananSel.value, 10);
+    const yTahunan = parseInt(tahunTahunanSel.value, 10);
+
+    const canvases = $$("#chartGrid canvas");
+    charts.forEach(c => c.destroy());
+    charts = [];
+
+    for (const cv of canvases){
+      const seksi = cv.dataset.seksi;
+      const kind  = cv.dataset.kind; // "bulan" atau "tahun"
+      cv.height = 320;
+
+      const series = await fetchSeries({ seksi, month, year: (kind==="bulan" ? yBulanan : yTahunan) });
+      if (kind === "bulan"){
+        const labels = series.daily.map(d => d.x);
+        const values = series.daily.map(d => d.y);
+        makeLineChart(cv.getContext("2d"), labels, values, `${seksi} — Bulanan`);
+      } else {
+        const labels = series.monthly.map(d => d.x);
+        const values = series.monthly.map(d => d.y);
+        makeLineChart(cv.getContext("2d"), labels, values, `${seksi} — Tahunan`);
       }
     }
-  };
-}
-
-function renderChart(canvasId, labels, data) {
-  if (chartRefs[canvasId]) {
-    chartRefs[canvasId].data.labels = labels;
-    chartRefs[canvasId].data.datasets[0].data = data;
-    chartRefs[canvasId].update();
-  } else {
-    chartRefs[canvasId] = new Chart(document.getElementById(canvasId), makeLineConfig(labels, data));
   }
-}
 
-async function loadChartsForSection(seksi, yBulanan, mBulanan, yTahunan) {
-  const qM = new URLSearchParams({ seksi, year: yBulanan, month: mBulanan });
-  const qY = new URLSearchParams({ seksi, year: yTahunan });
+  // set nilai awal dari server
+  if (window._chartOptions){
+    bulanSel.value = window._chartOptions.month;
+    tahunBulananSel.value = window._chartOptions.yearBulanan;
+    tahunTahunanSel.value = window._chartOptions.yearTahunan;
+  }
 
-  const month = await getJSON(`/api/series_month?${qM}`);
-  const year = await getJSON(`/api/series_year?${qY}`);
-  // month = { labels:[], data:[] }
-  renderChart(`ch-${seksi[0].toLowerCase()}-month`, month.labels, month.data);
-  renderChart(`ch-${seksi[0].toLowerCase()}-year`,  year.labels,  year.data);
-}
-
-// ====== INIT ======
-async function init() {
-  // set default tanggal = hari ini (UTC → local)
-  const today = new Date();
-  const iso = today.toISOString().slice(0,10);
-  el('tanggal').value = iso;
-
-  // dropdown bulan & tahun
-  const selBln = el('sel-bulan');
-  for (let i=1;i<=12;i++){ const o=document.createElement('option'); o.value=i; o.textContent=i; selBln.appendChild(o); }
-  selBln.value = today.getMonth()+1;
-
-  const years = await getJSON('/api/list_years'); // { years:[2024,2025,...] }
-  const selThBul = el('sel-tahun-bulanan');
-  const selThTah = el('sel-tahun-tahunan');
-  years.years.forEach(y=>{
-    const o1=document.createElement('option'); o1.value=y; o1.textContent=y; selThBul.appendChild(o1);
-    const o2=document.createElement('option'); o2.value=y; o2.textContent=y; selThTah.appendChild(o2);
-  });
-  selThBul.value = today.getFullYear();
-  selThTah.value = today.getFullYear();
-
-  // pertama: muat tabel harian
-  await loadDaily(iso);
-
-  // pertama: muat grafik semua seksi
-  const m = selBln.value, yb = selThBul.value, yt = selThTah.value;
-  await Promise.all([
-    loadChartsForSection('A III', yb, m, yt),
-    loadChartsForSection('B III', yb, m, yt),
-    loadChartsForSection('C II', yb, m, yt),
-    loadChartsForSection('D I', yb, m, yt),
-  ]);
-
-  // tombol2
-  el('btn-apply').addEventListener('click', async ()=>{
-    await loadDaily(el('tanggal').value);
-  });
-
-  el('btn-grafik').addEventListener('click', async ()=>{
-    const mm = el('sel-bulan').value;
-    const ybm = el('sel-tahun-bulanan').value;
-    const yt  = el('sel-tahun-tahunan').value;
-    await Promise.all([
-      loadChartsForSection('A III', ybm, mm, yt),
-      loadChartsForSection('B III', ybm, mm, yt),
-      loadChartsForSection('C II', ybm, mm, yt),
-      loadChartsForSection('D I', ybm, mm, yt),
-    ]);
-  });
-}
-
-init().catch(err=>console.error(err));
+  $("#btnRender").addEventListener("click", renderAll);
+  renderAll();
+})();
