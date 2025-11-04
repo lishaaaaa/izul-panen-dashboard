@@ -1,5 +1,8 @@
+# api/index.py
 import os, sys, traceback
 from serverless_wsgi import handle_request
+from app import app  # Re-export WSGI app untuk Vercel
+
 
 def _ensure_creds():
     p = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/service_account.json")
