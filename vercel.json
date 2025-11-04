@@ -1,6 +1,17 @@
 {
   "routes": [
-    { "src": "^/api/ping$", "dest": "/api/ping.py" },
-    { "src": "/.*", "dest": "/api/index" }
-  ]
+    { "src": "/api/ping$", "dest": "/api/ping.py" },
+    { "src": "/(.*)", "dest": "/api/index" }
+  ],
+  "functions": {
+    "api/index.py": {
+      "runtime": "vercel-python@0.6.2",
+      "includeFiles": [
+        "templates/**",
+        "static/**",
+        "app.py",
+        "sheets_io.py"
+      ]
+    }
+  }
 }
