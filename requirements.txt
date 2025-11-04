@@ -5,3 +5,4 @@ gspread==6.1.4
 google-auth==2.34.0
 pytz==2024.1
 python-dateutil==2.9.0.post0
+serverless-wsgi==3.0.4
