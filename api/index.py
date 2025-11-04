@@ -1,15 +1,29 @@
 # api/index.py
-import os
+import os, sys, traceback
 from serverless_wsgi import handle_request
-from app import app  # pastikan di app.py ada: app = Flask(__name__)
+from app import app
 
-# tulis kredensial SA ke path dari ENV (Vercel: /tmp)
-CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/service_account.json")
-JSON_ENV = os.getenv("GOOGLE_CREDENTIALS_JSON")
-if JSON_ENV and not os.path.exists(CREDS_PATH):
-    os.makedirs(os.path.dirname(CREDS_PATH), exist_ok=True)
-    with open(CREDS_PATH, "w", encoding="utf-8") as f:
-        f.write(JSON_ENV)
+def _ensure_creds():
+    p = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/service_account.json")
+    j = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if j and not os.path.exists(p):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(j)
+
+# minimal health biar gampang ping
+try:
+    @app.get("/health")
+    def _health(): return "ok", 200
+except Exception:
+    pass
 
 def handler(request, context):
-    return handle_request(app, request, context)
+    try:
+        _ensure_creds()
+        return handle_request(app, request, context)
+    except Exception as e:
+        print("🔥 Serverless crash:", e, file=sys.stderr)
+        traceback.print_exc()
+        return {"statusCode": 500, "body": "Internal error. Check Runtime Logs."}
+
