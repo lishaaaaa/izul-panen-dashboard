@@ -4,8 +4,6 @@
     { "src": "/(.*)", "dest": "/api/index" }
   ],
   "functions": {
-    "api/index.py": {
-      "runtime": "vercel-python@0.6.2"
-    }
+    "api/index.py": { "runtime": "python3.11" }
   }
 }
