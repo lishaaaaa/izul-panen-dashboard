@@ -2,32 +2,29 @@
 {% block content %}
 <div class="grid">
 
-  <!-- Panel filter & ringkasan -->
+  <!-- HEADER + FILTER -->
   <div class="card span-12">
-    <h3 style="margin-top:0">Dashboard Panen</h3>
+    <h2 style="margin:0 0 10px">Izul Panen Dashboard</h2>
 
-    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">
       <div>
         <label><b>Tanggal</b></label><br/>
         <select id="dateSelect"></select>
-        <button id="btnLoad">Tampilkan</button>
       </div>
+      <button id="btnLoad">Tampilkan</button>
 
-      <div id="badges" style="display:flex;gap:8px;flex-wrap:wrap">
-        <span class="badge" id="badgeTotal">Total Tanggal Ini: 0</span>
-        <!-- badge seksi akan diinject JS -->
-      </div>
+      <div id="badges" style="display:flex;gap:8px;flex-wrap:wrap;margin-left:auto"></div>
     </div>
   </div>
 
-  <!-- Tabel per seksi (akan dipasang dinamis) -->
+  <!-- TABEL PER SEKSI -->
   <div id="tablesWrap" class="card span-12"></div>
 
-  <!-- Grafik per seksi (bulanan & tahunan) -->
+  <!-- GRAFIK -->
   <div class="card span-12">
-    <h4>Grafik per Seksi (Bulanan & Tahunan)</h4>
+    <h3 style="margin:0 0 10px">Grafik per Seksi (Bulanan & Tahunan)</h3>
 
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
       <div>
         <label>Bulan</label><br/>
         <select id="monthSelect"></select>
@@ -43,18 +40,24 @@
       <button id="btnLoadCharts">Tampilkan Grafik</button>
     </div>
 
-    <div id="chartsWrap" class="grid" style="grid-template-columns:1fr 1fr;gap:24px"></div>
+    <div id="chartsWrap" class="grid" style="grid-template-columns:1fr 1fr;gap:22px"></div>
   </div>
-
 </div>
 
 <style>
-.badge {
-  display:inline-block; padding:8px 12px; border-radius:999px;
-  background:#f3f4f6; border:1px solid #e5e7eb; font-weight:600;
-}
-.seksi-title { margin:18px 0 8px; font-weight:700; }
-.total-row td { font-weight:700; }
-.canvas-box { border:1px solid #eee; border-radius:12px; padding:12px; background:#fff; }
+  .badge {
+    display:inline-block; padding:8px 12px; border-radius:999px;
+    background:#f3f4f6; border:1px solid #e5e7eb; font-weight:600;
+  }
+  .seksi-title { margin:18px 0 8px; font-weight:700; }
+  table { width:100%; border-collapse:collapse }
+  th, td { padding:10px; border-bottom:1px solid #eee; }
+  .total-row td { font-weight:700; }
+  /* bikin kanvas stabil & horizontal bars enak dilihat */
+  .canvas-box { border:1px solid #eee; border-radius:12px; padding:12px; background:#fff; height:320px; }
+  .canvas-box canvas { width:100% !important; height:100% !important; }
 </style>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script defer src="{{ url_for('static', filename='app.js') }}"></script>
 {% endblock %}
