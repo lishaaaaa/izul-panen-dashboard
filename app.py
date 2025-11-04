@@ -1,183 +1,185 @@
-import os, json, traceback
-from datetime import timedelta
-from flask import Flask, request, session, redirect, url_for, render_template, jsonify, send_from_directory, abort
+# app.py
+# Flask app untuk Izul Panen Dashboard
+# Catatan:
+# - Pastikan sheets_io.py menyediakan fungsi-fungsi yang dipanggil di sini.
+# - File template ada di /templates dan asset di /static (default Flask).
+# - Untuk deploy di Vercel, file /api/index.py akan meng-import `app` dari sini.
 
-# ===== Flask App =====
-app = Flask(__name__, static_folder="static", template_folder="templates")
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
+from datetime import datetime
+import os
 
-# SECRET_KEY & Session
-app.secret_key = os.getenv("SECRET_KEY", "devsecret")
-app.permanent_session_lifetime = timedelta(hours=12)
+# ==== import util ke Google Sheets (punyamu) ====
+# Wajib ada di sheets_io.py (sudah kamu commit sebelumnya):
+#   get_all_dates() -> list[str 'YYYY-MM-DD']
+#   get_daily_by_section(date_str) -> dict[str_section -> list[{'nama': str, 'janjang': int}]]
+#   get_totals_for_date(date_str) -> {'total_day': int, 'per_section': {section: int}}
+#   get_monthly_series(section, year, month) -> list[{'date': 'YYYY-MM-DD', 'janjang': int}]
+#   get_yearly_series(section, year) -> list[{'month': 'YYYY-MM', 'janjang': int}]
+#   COL_TANGGAL, COL_SEKSI, COL_NAMA, COL_JANJANG (konstanta kolom)
+from sheets_io import (
+    get_all_dates,
+    get_daily_by_section,
+    get_totals_for_date,
+    get_monthly_series,
+    get_yearly_series,
+    COL_TANGGAL, COL_SEKSI, COL_NAMA, COL_JANJANG
+)
 
-# Kredensial login (dari ENV)
-APP_USER = os.getenv("APP_USER", "admin")
-APP_PASS = os.getenv("APP_PASS", "dedi123")
+app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "dev-key")
 
-# ====== Sheets helper ======
-# Pastikan sheets_io.py mengekspor nama-nama di bawah ini
-try:
-    from sheets_io import (
-        _client, SHEET_ID, SHEET_TAB,
-        COL_TANGGAL, COL_NAMA, COL_SEKSI, COL_JANJANG
-    )
-except Exception as e:
-    # Biar /diag_sheets tetap bisa kasih jejak error waktu import gagal
-    _IMPORT_ERR = e
-else:
-    _IMPORT_ERR = None
+# Urutan seksi untuk tampilan
+SECTIONS = ["A III", "B III", "C II", "D I"]
 
+# ===== Helper kecil =====
+def _default_year_month():
+    now = datetime.now()
+    return now.year, now.month
 
-# ---------- Utils ----------
-def login_required(fn):
-    def _wrap(*args, **kwargs):
-        if not session.get("auth"):
-            return abort(401)
-        return fn(*args, **kwargs)
-    _wrap.__name__ = fn.__name__
-    return _wrap
+def _ensure_login():
+    return "user" in session
 
+# ====== Auth sederhana (optional) ======
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template("login.html", title="Login — Izul Panen")
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    # kredensial dari ENV (opsional)
+    u_ok = os.getenv("APP_USERNAME", "admin")
+    p_ok = os.getenv("APP_PASSWORD", "admin123")
+    if username == u_ok and password == p_ok:
+        session["user"] = username
+        return redirect(url_for("dashboard"))
+    return render_template("login.html", title="Login — Izul Panen", error="Username/Password salah")
 
-# ---------- Home ----------
-@app.get("/")
-def home():
-    return """
-    <h3>Izul Panen Dashboard</h3>
-    <p><a href="/login">Login</a> · <a href="/dashboard">Dashboard</a></p>
-    <p>Debug:
-      <a href="/health">/health</a>,
-      <a href="/test">/test</a>,
-      <a href="/diag_env">/diag_env</a>,
-      <a href="/diag_sheets">/diag_sheets</a>
-    </p>
-    """, 200
-
-
-# ---------- Auth ----------
-@app.get("/login")
-def login_form():
-    return """
-    <h3>Login</h3>
-    <form method="post" action="/login">
-      <label>Username</label><br/>
-      <input name="username" autocomplete="username"/><br/><br/>
-      <label>Password</label><br/>
-      <input name="password" type="password" autocomplete="current-password"/><br/><br/>
-      <button type="submit">Masuk</button>
-    </form>
-    """, 200
-
-
-@app.post("/login")
-def login_post():
-    # Terima form atau JSON
-    user = request.form.get("username") if request.form else None
-    pwd  = request.form.get("password") if request.form else None
-    if request.is_json:
-        j = request.get_json(silent=True) or {}
-        user = j.get("username", user)
-        pwd  = j.get("password", pwd)
-
-    if user == APP_USER and pwd == APP_PASS:
-        session.permanent = True
-        session["auth"] = True
-        return redirect("/dashboard")
-    return ("Unauthorized", 401)
-
-
-@app.post("/logout")
+@app.route("/logout")
 def logout():
     session.clear()
-    return redirect("/")
+    return redirect(url_for("login"))
 
+# ===== Root info ringkas =====
+@app.route("/")
+def index():
+    return "Izul Panen Dashboard\nLogin di /login atau langsung /dashboard bila sudah login.\nDebug: /health, /diag_env, /diag_sheets"
 
-# ---------- Pages ----------
-@app.get("/dashboard")
-@login_required
-def dashboard_page():
-    """
-    Render template 'dashboard.html'.
-    - Pastikan file ada di folder /templates/dashboard.html
-    - Static JS/CSS di /static/...
-    """
-    try:
-        return render_template("dashboard.html",
-                               title="Dashboard Izul Janjang",
-                               COL_TANGGAL=COL_TANGGAL,
-                               COL_SEKSI=COL_SEKSI,
-                               COL_NAMA=COL_NAMA,
-                               COL_JANJANG=COL_JANJANG)
-    except Exception:
-        # Fallback kalau belum ada templatenya: kirim file statis kalau kamu menyimpan HTML di /static
-        index_static = os.path.join(app.static_folder or "static", "dashboard.html")
-        if os.path.exists(index_static):
-            return send_from_directory(app.static_folder, "dashboard.html")
-        return ("Template 'dashboard.html' tidak ditemukan.", 500)
+# ====== Halaman utama dashboard ======
+@app.route("/dashboard")
+def dashboard():
+    # kalau mau wajib login, aktifkan blok ini:
+    # if not _ensure_login():
+    #     return redirect(url_for("login"))
 
+    # ambil list tanggal dari Sheets (untuk dropdown)
+    dates = get_all_dates()  # list 'YYYY-MM-DD'
+    dates_sorted = sorted(dates)  # ascending
+    if not dates_sorted:
+        # Jika sheet kosong
+        return render_template(
+            "dashboard.html",
+            title="Dashboard Izul Janjang",
+            available_dates=[],
+            selected_date=None,
+            total_today=0,
+            totals_section={s: 0 for s in SECTIONS},
+            tables_by_section={s: [] for s in SECTIONS},
+            default_month=_default_year_month()[1],
+            default_year=_default_year_month()[0],
+        )
 
-# ---------- Diagnostics ----------
-@app.get("/health")
+    # pilih tanggal: dari query ?tanggal=..., kalau kosong pakai terbaru
+    selected_date = request.args.get("tanggal")
+    if not selected_date or selected_date not in dates_sorted:
+        selected_date = dates_sorted[-1]  # terbaru
+
+    # data tabel per seksi untuk tanggal terpilih
+    tables_by_section = get_daily_by_section(selected_date)  # dict[section] -> list[{nama, janjang}]
+    # pastikan semua seksi ada key
+    for s in SECTIONS:
+        tables_by_section.setdefault(s, [])
+
+    # total-total
+    totals = get_totals_for_date(selected_date)  # {'total_day': int, 'per_section': {...}}
+    total_today = totals.get("total_day", 0)
+    totals_section = totals.get("per_section", {})
+    for s in SECTIONS:
+        totals_section.setdefault(s, 0)
+
+    # default dropdown grafik (bulan & tahun)
+    def_year, def_month = _default_year_month()
+
+    return render_template(
+        "dashboard.html",
+        title="Dashboard Izul Janjang",
+        available_dates=dates_sorted[::-1],   # descending biar terbaru di atas
+        selected_date=selected_date,
+        total_today=total_today,
+        totals_section=totals_section,
+        tables_by_section=tables_by_section,
+        default_month=def_month,
+        default_year=def_year,
+        sections=SECTIONS,
+        COL_TANGGAL=COL_TANGGAL, COL_SEKSI=COL_SEKSI, COL_NAMA=COL_NAMA, COL_JANJANG=COL_JANJANG
+    )
+
+# ====== Endpoint data grafik (AJAX dari dashboard.html) ======
+@app.route("/chart_data/monthly")
+def chart_data_monthly():
+    # Query: ?section=C%20II&year=2025&month=10
+    section = request.args.get("section", SECTIONS[0])
+    year = int(request.args.get("year", _default_year_month()[0]))
+    month = int(request.args.get("month", _default_year_month()[1]))
+    series = get_monthly_series(section, year, month)  # list[{date, janjang}]
+    # kembalikan format aman untuk chart (x: tanggal, y: nilai)
+    data = [{"x": row["date"], "y": int(row.get("janjang", 0))} for row in series]
+    return jsonify({"ok": True, "section": section, "year": year, "month": month, "data": data})
+
+@app.route("/chart_data/yearly")
+def chart_data_yearly():
+    # Query: ?section=C%20II&year=2025
+    section = request.args.get("section", SECTIONS[0])
+    year = int(request.args.get("year", _default_year_month()[0]))
+    series = get_yearly_series(section, year)  # list[{month:'YYYY-MM', janjang:int}]
+    data = [{"x": row["month"], "y": int(row.get("janjang", 0))} for row in series]
+    return jsonify({"ok": True, "section": section, "year": year, "data": data})
+
+# ====== Debug / Health ======
+@app.route("/health")
 def health():
-    return "ok", 200
-
-
-@app.get("/test")
-def test_alive():
-    return "alive", 200
-
-
-@app.get("/diag_env")
-def diag_env():
-    # Tampilkan env non-sensitif yang dipakai aplikasi
-    env_ok = {
-        "SHEET_ID": os.getenv("SHEET_ID"),
-        "SHEET_TAB": os.getenv("SHEET_TAB"),
-        "COL_TANGGAL": os.getenv("COL_TANGGAL"),
-        "COL_SEKSI": os.getenv("COL_SEKSI"),
-        "COL_NAMA": os.getenv("COL_NAMA"),
-        "COL_JANJANG": os.getenv("COL_JANJANG"),
-        "DATE_ORDER": os.getenv("DATE_ORDER"),
-        "GOOGLE_APPLICATION_CREDENTIALS": os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
-    }
-    return (json.dumps(env_ok), 200, {"Content-Type": "application/json"})
-
-
-@app.get("/diag_sheets")
-def diag_sheets():
-    # Kasus import error dari sheets_io
-    if _IMPORT_ERR is not None:
-        return jsonify({
-            "ok": False,
-            "error": f"ImportError: {str(_IMPORT_ERR)}",
-            "trace": traceback.format_exc()
-        }), 500
     try:
-        gc = _client()
-        sh = gc.open_by_key(SHEET_ID)
-        ws = sh.worksheet(SHEET_TAB)
-        info = {
-            "ok": True,
-            "spreadsheet_title": sh.title,
-            "worksheets": [w.title for w in sh.worksheets()],
-            "worksheet_title": ws.title,
-            "rows": ws.row_count,
-            "cols": ws.col_count,
-        }
-        return jsonify(info), 200
+        _ = get_all_dates()
+        return jsonify({"ok": True, "msg": "healthy"})
     except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/diag_env")
+def diag_env():
+    return jsonify({
+        "PY_VER": os.getenv("PYTHON_VERSION", "runtime-managed"),
+        "HAS_SECRET": bool(os.getenv("SECRET_KEY")),
+        "HAS_SA": bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")),
+    })
+
+@app.route("/diag_sheets")
+def diag_sheets():
+    try:
+        dates = get_all_dates()
         return jsonify({
-            "ok": False,
-            "error": str(e),
-            "trace": traceback.format_exc(),
-        }), 500
+            "ok": True,
+            "dates_sample": dates[:5],
+            "cols": {
+                "COL_TANGGAL": COL_TANGGAL,
+                "COL_SEKSI": COL_SEKSI,
+                "COL_NAMA": COL_NAMA,
+                "COL_JANJANG": COL_JANJANG
+            }
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-
-# ---------- Static helper (optional) ----------
-@app.get("/static/<path:fname>")
-def _static(fname):
-    return send_from_directory(app.static_folder, fname)
-
-
-# ---------- Local run ----------
-if __name__ == "__main__":
-    # Jalankan lokal untuk debug
-    app.run(debug=True)
+# Tidak perlu `if __name__ == "__main__":` untuk Vercel (runtime yang jalankan).
+# Kalau mau jalankan lokal:
+# if __name__ == "__main__":
+#     app.run(host="0.0.0.0", port=5000, debug=True)
