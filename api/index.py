@@ -12,8 +12,7 @@ def _ensure_creds():
 def handler(request, context):
     try:
         _ensure_creds()
-        # LAZY IMPORT: kalau ada error dalam app.py, trace-nya muncul di Runtime Logs
-        from app import app
+        from app import app  # lazy import biar errornya keliatan jelas di logs
         return handle_request(app, request, context)
     except Exception as e:
         print("🔥 Serverless crash in handler:", e, file=sys.stderr)
