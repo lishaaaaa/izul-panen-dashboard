@@ -1,8 +1,4 @@
 Flask==3.0.3
-gunicorn==21.2.0
-python-dotenv==1.0.1
-gspread==6.1.4
-google-auth==2.34.0
-pytz==2024.1
+gspread==6.0.0
+google-auth==2.35.0
 python-dateutil==2.9.0.post0
-serverless-wsgi==3.0.4
