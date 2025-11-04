@@ -1,231 +1,157 @@
 # sheets_io.py
-import os, time
+# Util Google Sheets untuk Flask/Vercel
+
+import os
+import json
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
 import gspread
 from google.oauth2.service_account import Credentials
-from dateutil import parser as dparser
-from datetime import datetime, timedelta, date
-from calendar import monthrange
 
-# ============= KONFIGURASI ENV =============
-SCOPES     = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/service_account.json")
-JSON_ENV   = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
-SHEET_ID   = os.getenv("SHEET_ID", "").strip()
-SHEET_TAB  = os.getenv("SHEET_TAB", "Form Responses 1").strip()
+# =========
+# ENV & Kolom
+# =========
 
-# Nama kolom (header di Google Sheet)
-COL_TANGGAL = os.getenv("COL_TANGGAL", "Hari Tanggal Hari ini").strip()
-COL_SEKSI   = os.getenv("COL_SEKSI", "Masukkan Lokasi Seksi yang di Input").strip()
+# ID spreadsheet & nama worksheet
+SHEET_ID: str = os.getenv("SHEET_ID", "").strip()
+SHEET_TAB: str = os.getenv("SHEET_TAB", "Form Responses 1").strip()
 
-# Preferensi format tanggal: "DMY" (default) atau "MDY"
-DATE_ORDER  = (os.getenv("DATE_ORDER", "DMY") or "DMY").upper()
+# Nama kolom (boleh dioverride via ENV agar fleksibel)
+COL_TANGGAl_DEFAULT = "Hari Tanggal Hari ini"   # catatan: nama kolom sesuai contohmu
+COL_SEKSI_DEFAULT   = "Masukkan Lokasi Seksi yang di Input"
+COL_NAMA_DEFAULT    = "Nama"
+COL_JANJANG_DEFAULT = "Jumlah Janjang"
 
-# Daftar pemanen (kolom-kolom berisi angka janjang)
-WORKERS = [
-    "Agus","Bagol","Herman","Keleng","Paeng","Riadi","Supri","Suri","Wagiso"
+COL_TANGGAL: str = os.getenv("COL_TANGGAL", COL_TANGGAl_DEFAULT).strip()
+COL_SEKSI:   str = os.getenv("COL_SEKSI",   COL_SEKSI_DEFAULT).strip()
+COL_NAMA:    str = os.getenv("COL_NAMA",    COL_NAMA_DEFAULT).strip()
+COL_JANJANG: str = os.getenv("COL_JANJANG", COL_JANJANG_DEFAULT).strip()
+
+# Path default file kredensial di Vercel (pakai /tmp)
+DEFAULT_SA_PATH = "/tmp/service_account.json"
+
+# Scopes standar untuk Sheets & (opsional) Drive readonly
+_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# ============= TULIS KREDENSIAL JSON (jika ada di ENV) =============
-def _ensure_creds_file():
-    """
-    Di Vercel, simpan GOOGLE_CREDENTIALS_JSON ke path CREDS_PATH saat cold start.
-    Aman karena filesystem /tmp bersifat ephemeral per instance.
-    """
-    if JSON_ENV and not os.path.exists(CREDS_PATH):
-        try:
-            os.makedirs(os.path.dirname(CREDS_PATH), exist_ok=True)
-        except Exception:
-            pass
-        with open(CREDS_PATH, "w", encoding="utf-8") as f:
-            f.write(JSON_ENV)
 
-# ============= KLIEN GSPREAD =============
-def _client():
-    _ensure_creds_file()
-    creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
+# =========
+# Kredensial & Client
+# =========
+
+def _ensure_creds_file() -> str:
+    """
+    Pastikan file service account tersedia.
+    Skenario yang didukung:
+    1) GOOGLE_CREDENTIALS_JSON = string JSON SA → ditulis ke /tmp/service_account.json
+    2) GOOGLE_APPLICATION_CREDENTIALS = path ke file JSON yang valid
+    """
+    # 1) Jika user menaruh JSON string di ENV
+    json_env = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if json_env:
+        p = Path(DEFAULT_SA_PATH)
+        if not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # validasi minimal bisa di-load sebagai JSON
+            try:
+                obj = json.loads(json_env)
+                with p.open("w", encoding="utf-8") as f:
+                    json.dump(obj, f)
+            except Exception as e:
+                raise RuntimeError(f"Gagal parse GOOGLE_CREDENTIALS_JSON: {e}")
+        # set juga var standar agar lib google memakainya
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = DEFAULT_SA_PATH
+        return DEFAULT_SA_PATH
+
+    # 2) Kalau user sudah set path file
+    path_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", DEFAULT_SA_PATH).strip()
+    if Path(path_env).exists():
+        return path_env
+
+    # Tidak ada kredensial yang valid
+    raise RuntimeError(
+        "Kredensial Google tidak ditemukan. "
+        "Set salah satu: GOOGLE_CREDENTIALS_JSON (isi JSON) atau "
+        "GOOGLE_APPLICATION_CREDENTIALS (path file)."
+    )
+
+
+def _client() -> gspread.client.Client:
+    """Bangun gspread client dengan Service Account."""
+    sa_path = _ensure_creds_file()
+    creds = Credentials.from_service_account_file(sa_path, scopes=_SCOPES)
     return gspread.authorize(creds)
 
-# ============= UTIL =============
-def _parse_date(v):
-    """Parse tanggal dengan preferensi DATE_ORDER (DMY/MDY) dan fallback ke dateutil."""
-    if isinstance(v, (datetime, date)):
-        return datetime.combine(v, datetime.min.time())
 
-    s = str(v).strip()
-    if not s:
-        return None
+# =========
+# Helper akses Sheet
+# =========
 
-    # Normalisasi pemisah agar strptime lebih mudah
-    s_norm = s.replace("-", "/").strip()
-
-    patterns_MDY = ["%m/%d/%Y", "%m/%d/%y"]
-    patterns_DMY = ["%d/%m/%Y", "%d/%m/%y"]
-    patterns = (patterns_MDY + patterns_DMY) if DATE_ORDER == "MDY" else (patterns_DMY + patterns_MDY)
-
-    for fmt in patterns:
-        try:
-            dt = datetime.strptime(s_norm, fmt)
-            return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        except Exception:
-            pass
-
-    try:
-        dayfirst = (DATE_ORDER != "MDY")
-        dt = dparser.parse(s, dayfirst=dayfirst)
-        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    except Exception:
-        return None
-
-def _to_num(v):
-    s = str(v).strip()
-    if s == "":
-        return None
-    try:
-        return float(s.replace(",", "."))
-    except Exception:
-        return None
-
-# ============= CACHE SEDERHANA =============
-_cache = {"at": 0.0, "rows": []}
-TTL = 30  # detik
-
-# ============= LOAD DATA: wide -> long =============
-def _rows():
+def get_sheet():
     """
-    Baca sheet 'wide' (tiap nama pemanen adalah kolom) -> list of dict:
-    {tanggal(datetime), tanggal_str, seksi, nama, janjang(float)}
+    Return worksheet (gspread.models.Worksheet) sesuai SHEET_ID & SHEET_TAB.
     """
-    now = time.time()
-    if now - _cache["at"] < TTL and _cache["rows"]:
-        return _cache["rows"]
-
     if not SHEET_ID:
-        _cache.update(at=now, rows=[])
-        return []
+        raise RuntimeError("SHEET_ID belum di-set di ENV.")
+    gc = _client()
+    sh = gc.open_by_key(SHEET_ID)
+    ws = sh.worksheet(SHEET_TAB)
+    return ws
 
-    ws = _client().open_by_key(SHEET_ID).worksheet(SHEET_TAB)
-    vals = ws.get_all_values()
-    if not vals:
-        _cache.update(at=now, rows=[])
-        return []
 
-    header = [h.strip() for h in vals[0]]
-    try:
-        i_tgl   = header.index(COL_TANGGAL)
-        i_seksi = header.index(COL_SEKSI)
-    except ValueError:
-        _cache.update(at=now, rows=[])
-        return []
+def list_worksheets() -> List[str]:
+    """
+    Kembalikan daftar nama worksheet di spreadsheet.
+    """
+    if not SHEET_ID:
+        raise RuntimeError("SHEET_ID belum di-set di ENV.")
+    gc = _client()
+    sh = gc.open_by_key(SHEET_ID)
+    return [w.title for w in sh.worksheets()]
 
-    # mapping kolom pekerja
-    worker_idx = []
-    for i, h in enumerate(header):
-        hs = h.strip()
-        if hs in WORKERS:
-            worker_idx.append((i, hs))
 
-    out = []
-    for row in vals[1:]:
-        if len(row) <= max(i_tgl, i_seksi):
-            continue
-        tgl_str = (row[i_tgl] if i_tgl < len(row) else "").strip()
-        seksi   = (row[i_seksi] if i_seksi < len(row) else "").strip()
-        if not tgl_str or not seksi:
-            continue
+def fetch_records() -> List[Dict[str, Any]]:
+    """
+    Ambil semua baris sebagai list of dict (header = baris pertama).
+    Aman untuk read-only dashboard.
+    """
+    ws = get_sheet()
+    return ws.get_all_records()  # type: ignore[no-any-return]
 
-        tgl = _parse_date(tgl_str)
-        if not tgl:
-            continue
 
-        for i, wname in worker_idx:
-            val = row[i].strip() if i < len(row) else ""
-            j = _to_num(val)
-            if j is None:  # kalau mau treat kosong=0, ganti ke: j = 0.0
-                continue
-            out.append({
-                "tanggal": tgl,
-                "tanggal_str": tgl_str,
-                "seksi": seksi,
-                "nama": wname,
-                "janjang": j
-            })
+def fetch_rows_values() -> List[List[Any]]:
+    """
+    Ambil semua nilai mentah (tanpa header dict), untuk kebutuhan tertentu.
+    """
+    ws = get_sheet()
+    return ws.get_all_values()  # type: ignore[no-any-return]
 
-    out.sort(key=lambda x: (x["tanggal"], x["seksi"], x["nama"]))
-    _cache.update(at=now, rows=out)
-    return out
 
-# ============= API (harian) =============
-def list_dates_str():
-    """Daftar tanggal unik (string dari Sheet) berurutan kronologis."""
-    seen = {}
-    for r in _rows():
-        s = r["tanggal_str"]
-        if s not in seen:
-            seen[s] = r["tanggal"]
-    return [k for k, _ in sorted(seen.items(), key=lambda kv: kv[1])]
+def diag_info() -> Dict[str, Any]:
+    """
+    Informasi singkat untuk endpoint /diag_sheets
+    """
+    gc = _client()
+    sh = gc.open_by_key(SHEET_ID)
+    info = {
+        "ok": True,
+        "spreadsheet_title": sh.title,
+        "worksheets": [w.title for w in sh.worksheets()],
+    }
+    return info
 
-def rows_by_date_str(date_str):
-    key = str(date_str).strip()
-    return [r for r in _rows() if str(r["tanggal_str"]).strip() == key]
 
-def totals_per_seksi(rows):
-    tot = {}
-    for r in rows:
-        tot[r["seksi"]] = tot.get(r["seksi"], 0) + (r["janjang"] or 0)
-    grand = sum(tot.values())
-    return tot, grand
-
-# ============= API (rolling window) =============
-def series_for_section(seksi, end_date, days_window):
-    rows = [r for r in _rows() if r["seksi"] == seksi]
-    if not rows:
-        return [], []
-    end_dt = _parse_date(end_date) or max(r["tanggal"] for r in rows)
-    start_dt = end_dt - timedelta(days=days_window - 1)
-
-    bucket = {}
-    for r in rows:
-        if start_dt <= r["tanggal"] <= end_dt:
-            k = r["tanggal"].date().isoformat()
-            bucket[k] = bucket.get(k, 0) + (r["janjang"] or 0)
-
-    labels, data = [], []
-    cur = start_dt
-    while cur <= end_dt:
-        k = cur.date().isoformat()
-        labels.append(k)
-        data.append(bucket.get(k, 0))
-        cur += timedelta(days=1)
-    return labels, data
-
-# ============= API (dropdown bulan/tahun & seri) =============
-def list_years():
-    return sorted({ r["tanggal"].year for r in _rows() })
-
-def list_months(year=None):
-    rs = _rows()
-    if year:
-        rs = [r for r in rs if r["tanggal"].year == int(year)]
-    return sorted({ r["tanggal"].month for r in rs })
-
-def series_month(seksi, year, month):
-    y, m = int(year), int(month)
-    rs = [r for r in _rows() if r["seksi"]==seksi and r["tanggal"].year==y and r["tanggal"].month==m]
-    days = monthrange(y, m)[1]
-    bucket = { d:0 for d in range(1, days+1) }
-    for r in rs:
-        bucket[r["tanggal"].day] += (r["janjang"] or 0)
-    labels = [f"{y}-{m:02d}-{d:02d}" for d in range(1, days+1)]
-    data   = [bucket[d] for d in range(1, days+1)]
-    return labels, data
-
-def series_year(seksi, year):
-    y = int(year)
-    rs = [r for r in _rows() if r["seksi"]==seksi and r["tanggal"].year==y]
-    bucket = { m:0 for m in range(1,13) }
-    for r in rs:
-        bucket[r["tanggal"].month] += (r["janjang"] or 0)
-    labels = [f"{y}-{m:02d}" for m in range(1,13)]
-    data   = [bucket[m] for m in range(1,13)]
-    return labels, data
+# Ekspor yang dipakai modul lain
+__all__ = [
+    # konstanta kolom
+    "COL_TANGGAL", "COL_SEKSI", "COL_NAMA", "COL_JANJANG",
+    # sheet config
+    "SHEET_ID", "SHEET_TAB",
+    # utilities
+    "_client", "get_sheet", "list_worksheets", "fetch_records",
+    "fetch_rows_values", "diag_info",
+]
