@@ -6,8 +6,7 @@
     }
   },
   "routes": [
-    { "src": "^/api/ping$", "dest": "api/ping.py" },
-    { "src": "^(?!/api/).*", "dest": "api/index" }
-  ],
-  "buildCommand": "python -m pip install -r requirements.txt"
+    { "src": "^/api/ping$", "dest": "/api/ping.py" },
+    { "src": "^(?!/api/).*", "dest": "/api/index" }
+  ]
 }
