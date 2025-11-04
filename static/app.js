@@ -1,201 +1,264 @@
-let charts = {}; // simpan instance Chart per seksi
+/* ================= Chart.js defaults (matikan animasi) ================= */
+Chart.defaults.animation = false;
+Chart.defaults.transitions.active = { animation: { duration: 0 } };
+Chart.defaults.transitions.show = { animation: { duration: 0 } };
+Chart.defaults.transitions.hide = { animation: { duration: 0 } };
 
-async function jget(url){
-  const r = await fetch(url);
-  return r.json();
+/* ================= Utilities ================= */
+const $ = (sel, root=document) => root.querySelector(sel);
+const el = (tag, attrs={}) => Object.assign(document.createElement(tag), attrs);
+const fmt = (n) => (Math.round((n ?? 0) * 100) / 100).toString();
+
+/* state */
+const charts = new Map(); // key -> Chart
+let lastRows = [];        // cache rows by date (utk bikin daftar seksi)
+
+function destroyChart(key){
+  const c = charts.get(key);
+  if (c) { try { c.destroy(); } catch{}; charts.delete(key); }
 }
 
-function groupBy(arr, keyFn){
-  const map = {};
-  arr.forEach(x=>{
-    const k = keyFn(x);
-    (map[k] ||= []).push(x);
+/* ================= Fetch helpers ================= */
+async function api(path, params){
+  const url = new URL(path, window.location.origin);
+  if (params) Object.entries(params).forEach(([k,v])=>url.searchParams.set(k, v));
+  const r = await fetch(url);
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || 'API error');
+  return j;
+}
+
+/* ================== Badges & Table ================== */
+function renderBadges(grand, totalsBySeksi){
+  const wrap = $('#badges');
+  wrap.innerHTML = '';
+  const bTotal = el('span', { className:'badge', textContent:`Total Tanggal Ini: ${fmt(grand)}`});
+  wrap.append(bTotal);
+
+  Object.entries(totalsBySeksi).sort().forEach(([seksi, v])=>{
+    wrap.append(el('span', { className:'badge', textContent:`${seksi}: ${fmt(v)}`}));
   });
+}
+
+function groupBySeksi(rows){
+  const map = {};
+  for (const r of rows){
+    (map[r.seksi] ||= []).push(r);
+  }
   return map;
 }
 
-function fmt(num){
-  if(num == null) return "0";
-  return Number(num).toLocaleString("id-ID");
-}
-
-async function initDates(){
-  const j = await jget('/api/dates');
-  const sel = document.getElementById('dateSelect');
-  sel.innerHTML = '';
-  (j.dates || []).forEach(d=>{
-    const o = document.createElement('option'); o.value=d; o.textContent=d;
-    sel.appendChild(o);
-  });
-}
-
-async function initYearMonth(){
-  // years
-  const jy = await jget('/api/years');
-  const ys1 = document.getElementById('yearSelectMonth');
-  const ys2 = document.getElementById('yearSelectYear');
-  [ys1, ys2].forEach(sel=>{
-    sel.innerHTML = '';
-    (jy.years || []).forEach(y=>{
-      const o = document.createElement('option'); o.value=y; o.textContent=y;
-      sel.appendChild(o);
-    });
-  });
-
-  // months (default: pakai yearSelectMonth value)
-  await fillMonths();
-}
-
-async function fillMonths(){
-  const y = document.getElementById('yearSelectMonth').value;
-  const jm = await jget('/api/months?year='+encodeURIComponent(y));
-  const ms = document.getElementById('monthSelect');
-  ms.innerHTML = '';
-  const months = jm.months && jm.months.length ? jm.months : [1,2,3,4,5,6,7,8,9,10,11,12];
-  months.forEach(m=>{
-    const o = document.createElement('option'); o.value=m; o.textContent=m.toString().padStart(2,'0');
-    ms.appendChild(o);
-  });
-}
-
-function renderBadges(rows){
-  const badgeWrap = document.getElementById('badges');
-  // hapus semua badge seksi lama (selain first “Total Tanggal Ini”)
-  Array.from(badgeWrap.querySelectorAll('.badge.seksi')).forEach(el=>el.remove());
-
-  const grand = rows.reduce((a,b)=>a+(b.janjang||0),0);
-  document.getElementById('badgeTotal').textContent = 'Total Tanggal Ini: '+fmt(grand);
-
-  const bySeksi = groupBy(rows, r=>r.seksi);
-  Object.keys(bySeksi).sort().forEach(seksi=>{
-    const tot = bySeksi[seksi].reduce((a,b)=>a+(b.janjang||0),0);
-    const span = document.createElement('span');
-    span.className = 'badge seksi';
-    span.textContent = `${seksi}: ${fmt(tot)}`;
-    badgeWrap.appendChild(span);
-  });
-}
-
 function renderTables(rows){
-  const wrap = document.getElementById('tablesWrap');
+  const wrap = $('#tablesWrap');
   wrap.innerHTML = '';
 
-  const bySeksi = groupBy(rows, r=>r.seksi);
-  Object.keys(bySeksi).sort().forEach(seksi=>{
-    const list = bySeksi[seksi];
+  const bySeksi = groupBySeksi(rows);
+  const seksiNames = Object.keys(bySeksi).sort();
 
-    const title = document.createElement('div');
-    title.className = 'seksi-title';
-    title.textContent = 'Seksi ' + seksi;
-    wrap.appendChild(title);
+  if (seksiNames.length === 0){
+    wrap.innerHTML = '<p>Tidak ada data pada tanggal ini.</p>';
+    return [];
+  }
 
-    const table = document.createElement('table');
-    table.innerHTML = `
-      <thead><tr><th>Nama Pemanen</th><th>Jumlah Janjang</th></tr></thead>
-      <tbody></tbody>`;
-    const tb = table.querySelector('tbody');
+  // urut nama pekerja fix seperti di data
+  const order = ["Agus","Bagol","Herman","Keleng","Paeng","Riadi","Supri","Suri","Wagiso"];
 
-    // urut nama
-    const byNama = groupBy(list, r=>r.nama);
-    const names = Object.keys(byNama).sort();
+  const usedSeksi = [];
 
-    names.forEach(n=>{
-      const sum = byNama[n].reduce((a,b)=>a+(b.janjang||0),0);
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${n}</td><td>${fmt(sum)}</td>`;
+  for (const seksi of seksiNames){
+    usedSeksi.push(seksi);
+    const rowsS = bySeksi[seksi];
+
+    const card = el('div', { className:'card span-12' });
+    card.append(el('div', { className:'seksi-title', textContent:`Seksi ${seksi}` }));
+
+    // tabel
+    const tbl = el('table');
+    const thead = el('thead');
+    thead.innerHTML = `<tr><th style="width:50%">Nama Pemanen</th><th>Jumlah Janjang</th></tr>`;
+    tbl.appendChild(thead);
+
+    const tb = el('tbody');
+    let subtotal = 0;
+
+    // map nama->total
+    const mapName = {};
+    for (const r of rowsS) mapName[r.nama] = (mapName[r.nama] || 0) + (r.janjang || 0);
+
+    // urut sesuai daftar pekerja
+    order.forEach(n=>{
+      const v = mapName[n] ?? 0;
+      subtotal += v;
+      const tr = el('tr');
+      tr.innerHTML = `<td>${n}</td><td>${fmt(v)}</td>`;
       tb.appendChild(tr);
     });
 
-    // total
-    const tot = list.reduce((a,b)=>a+(b.janjang||0),0);
-    const trTot = document.createElement('tr');
-    trTot.className = 'total-row';
-    trTot.innerHTML = `<td>Total</td><td>${fmt(tot)}</td>`;
-    tb.appendChild(trTot);
+    // total row
+    const trT = el('tr', { className:'total-row' });
+    trT.innerHTML = `<td>Total</td><td>${fmt(subtotal)}</td>`;
+    tb.appendChild(trT);
 
-    wrap.appendChild(table);
+    tbl.appendChild(tb);
+    card.appendChild(tbl);
+    wrap.appendChild(card);
+  }
+
+  return usedSeksi;
+}
+
+/* ================== Horizontal Charts ================== */
+function renderHorizontalChart({ key, ctx, labels, data, title }){
+  destroyChart(key);
+  const maxVal = Math.max(0, ...data);
+  const suggestedMax = maxVal > 0 ? Math.ceil(maxVal * 1.1) : 1;
+
+  const chart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Janjang",
+        data,
+        borderWidth: 1,
+        barThickness: 18,
+        categoryPercentage: 0.9
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      indexAxis: "y",
+      animation: false,
+      plugins: {
+        legend: { display:false },
+        title: { display: !!title, text: title, padding:{ bottom:8 } },
+        tooltip: { enabled:true }
+      },
+      scales: {
+        x: { beginAtZero:true, suggestedMax, grid:{ color:"rgba(0,0,0,0.05)" }, ticks:{ precision:0 } },
+        y: { grid:{ display:false } }
+      }
+    }
   });
+
+  charts.set(key, chart);
 }
 
-async function loadByDate(){
-  const d = document.getElementById('dateSelect').value;
-  const j = await jget('/api/by-date?date='+encodeURIComponent(d));
-  if(!j.ok){ alert(j.error||'Gagal'); return; }
-  renderBadges(j.rows || []);
-  renderTables(j.rows || []);
+function makeChartPanel(seksi){
+  const box = el('div', { className:'canvas-box' });
+  const c = el('canvas');
+  box.appendChild(c);
+  const box2 = el('div', { className:'canvas-box' });
+  const c2 = el('canvas');
+  box2.appendChild(c2);
+
+  const container = el('div');
+  container.appendChild(el('div', { style:'font-weight:700;margin:6px 0', textContent:`${seksi}` }));
+  container.style.gridColumn = '1 / -1'; // judul seksi
+  return { header:container, monthBox:box, monthCanvas:c, yearBox:box2, yearCanvas:c2 };
 }
 
-function ensureChart(id){
-  const canvas = document.getElementById(id);
-  if(!charts[id]) return null;
-  charts[id].destroy();
-  charts[id] = null;
-  return canvas;
-}
+async function renderCharts(seksiList){
+  const month = +$('#monthSelect').value;
+  const yMonth = +$('#yearSelectMonth').value;
+  const yYear  = +$('#yearSelectYear').value;
 
-async function loadCharts(){
-  const yearMonth = parseInt(document.getElementById('yearSelectMonth').value,10);
-  const month     = parseInt(document.getElementById('monthSelect').value,10);
-  const yearOnly  = parseInt(document.getElementById('yearSelectYear').value,10);
+  const wrap = $('#chartsWrap');
+  wrap.innerHTML = '';
 
-  // seksi diambil dari tabel/badges terbaru
-  const badgeWrap = document.getElementById('badges');
-  const seksiNames = Array.from(badgeWrap.querySelectorAll('.badge.seksi')).map(b=>b.textContent.split(':')[0]);
+  for (const seksi of seksiList){
+    // header + dua canvas
+    const { header, monthBox, monthCanvas, yearBox, yearCanvas } = makeChartPanel(`Seksi ${seksi}`);
+    wrap.appendChild(header);
+    wrap.appendChild(monthBox);
+    wrap.appendChild(yearBox);
 
-  const chartsWrap = document.getElementById('chartsWrap');
-  chartsWrap.innerHTML = '';
+    // BULANAN
+    const jm = await api('/api/series/month', { seksi, year:yMonth, month });
+    renderHorizontalChart({
+      key: `month-${seksi}`,
+      ctx: monthCanvas.getContext('2d'),
+      labels: jm.labels,
+      data: jm.data,
+      title: `${seksi} — Bulanan (${yMonth}-${String(month).padStart(2,'0')})`
+    });
 
-  for(const seksi of seksiNames){
-    const boxL = document.createElement('div'); boxL.className='canvas-box';
-    const boxR = document.createElement('div'); boxR.className='canvas-box';
-    const idMonth = `chart_m_${seksi.replace(/\s+/g,'_')}`;
-    const idYear  = `chart_y_${seksi.replace(/\s+/g,'_')}`;
-    boxL.innerHTML = `<b>${seksi}</b> — Bulanan (${yearMonth}-${String(month).padStart(2,'0')})<br/><canvas id="${idMonth}" height="180"></canvas>`;
-    boxR.innerHTML = `<b>${seksi}</b> — Tahunan (${yearOnly})<br/><canvas id="${idYear}" height="180"></canvas>`;
-    chartsWrap.appendChild(boxL);
-    chartsWrap.appendChild(boxR);
-
-    const jm = await jget(`/api/series/month?seksi=${encodeURIComponent(seksi)}&year=${yearMonth}&month=${month}`);
-    const jy = await jget(`/api/series/year?seksi=${encodeURIComponent(seksi)}&year=${yearOnly}`);
-
-    // Bulanan
-    if(jm.ok){
-      ensureChart(idMonth);
-      const ctx = document.getElementById(idMonth).getContext('2d');
-      charts[idMonth] = new Chart(ctx, {
-        type: 'line',
-        data: { labels: jm.labels, datasets:[{ label:'Janjang', data: jm.data, fill:true }] },
-        options: { responsive:true, maintainAspectRatio:false,
-          scales:{ y:{ beginAtZero:true } }
-        }
-      });
-    }
-
-    // Tahunan
-    if(jy.ok){
-      ensureChart(idYear);
-      const ctx2 = document.getElementById(idYear).getContext('2d');
-      charts[idYear] = new Chart(ctx2, {
-        type: 'line',
-        data: { labels: jy.labels, datasets:[{ label:'Janjang', data: jy.data, fill:true }] },
-        options: { responsive:true, maintainAspectRatio:false,
-          scales:{ y:{ beginAtZero:true } }
-        }
-      });
-    }
+    // TAHUNAN
+    const jy = await api('/api/series/year', { seksi, year:yYear });
+    renderHorizontalChart({
+      key: `year-${seksi}`,
+      ctx: yearCanvas.getContext('2d'),
+      labels: jy.labels,
+      data: jy.data,
+      title: `${seksi} — Tahunan (${yYear})`
+    });
   }
 }
 
-document.addEventListener('DOMContentLoaded', async ()=>{
-  await initDates();
-  await initYearMonth();
-  document.getElementById('yearSelectMonth').addEventListener('change', fillMonths);
-  document.getElementById('btnLoad').addEventListener('click', loadByDate);
-  document.getElementById('btnLoadCharts').addEventListener('click', loadCharts);
+/* ================== Select helpers (dates / years / months) ================== */
+async function fillDates(){
+  const j = await api('/api/dates');
+  const sel = $('#dateSelect');
+  sel.innerHTML = '';
+  j.dates.forEach(d => sel.appendChild(el('option', { value:d, textContent:d })));
+  // default: terakhir (paling baru)
+  if (j.dates.length) sel.value = j.dates[j.dates.length - 1];
+}
 
-  // auto load awal
-  setTimeout(async ()=>{
-    await loadByDate();
-    await loadCharts();
-  }, 200);
-});
+async function fillYearsMonths(){
+  const y1 = await api('/api/years');
+  const ys = y1.years.sort((a,b)=>a-b);
+  const ySelM = $('#yearSelectMonth');
+  const ySelY = $('#yearSelectYear');
+  ySelM.innerHTML = ''; ySelY.innerHTML = '';
+  ys.forEach(y=>{
+    ySelM.appendChild(el('option', { value:y, textContent:y }));
+    ySelY.appendChild(el('option', { value:y, textContent:y }));
+  });
+  if (ys.length){
+    ySelM.value = ys[ys.length-1];
+    ySelY.value = ys[ys.length-1];
+  }
+
+  const mSel = $('#monthSelect');
+  mSel.innerHTML = '';
+  for (let m=1;m<=12;m++) mSel.appendChild(el('option',{value:m,textContent:m}));
+  const now = new Date();
+  mSel.value = now.getMonth()+1;
+}
+
+/* ================== Main flows ================== */
+async function drawForSelectedDate(){
+  const date = $('#dateSelect').value;
+  const j = await api('/api/by-date', { date });
+  lastRows = j.rows || [];
+
+  // badges + table
+  renderBadges(j.grand || 0, j.totals || {});
+  const seksiList = renderTables(lastRows);
+
+  // jika belum ada list seksi → kosongkan chart wrap
+  if (!seksiList.length){
+    $('#chartsWrap').innerHTML = '<p>Grafik tidak tersedia karena data kosong.</p>';
+  }
+  return seksiList;
+}
+
+async function init(){
+  await fillDates();
+  await fillYearsMonths();
+  const seksiList = await drawForSelectedDate();
+
+  $('#btnLoad').addEventListener('click', async ()=>{
+    const s = await drawForSelectedDate();
+    // jangan auto-rerender chart; user klik tombol khusus
+  });
+
+  $('#btnLoadCharts').addEventListener('click', async ()=>{
+    const s = (lastRows.length ? Array.from(new Set(lastRows.map(r=>r.seksi))).sort() : []);
+    await renderCharts(s.length ? s : seksiList);
+  });
+}
+
+document.addEventListener('DOMContentLoaded', init);
