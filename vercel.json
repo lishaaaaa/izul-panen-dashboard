@@ -1,9 +1,12 @@
 {
-  "routes": [
-    { "src": "/api/ping$", "dest": "/api/ping.py" },
-    { "src": "/(.*)", "dest": "/api/index" }
-  ],
   "functions": {
-    "api/index.py": { "runtime": "python3.11" }
-  }
+    "api/index.py": {
+      "runtime": "python3.11",
+      "includeFiles": "templates/**,static/**,app.py,sheets_io.py"
+    }
+  },
+  "routes": [
+    { "src": "^/api/ping$", "dest": "api/ping.py" },
+    { "src": "^(?!/api/).*", "dest": "api/index.py" }
+  ]
 }
