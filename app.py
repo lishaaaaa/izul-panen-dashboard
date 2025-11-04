@@ -1,8 +1,6 @@
 # app.py
 import os
-from flask import (
-    Flask, jsonify, request, session, redirect, render_template
-)
+from flask import Flask, jsonify, request, session, redirect, render_template
 
 # ===================== Flask App =====================
 app = Flask(__name__)
@@ -32,7 +30,7 @@ def home():
         )
     return redirect("/dashboard", code=302)
 
-# favicon supaya browser nggak memicu 500
+# favicon supaya browser nggak bikin 500
 @app.get("/favicon.ico")
 def favicon():
     return redirect("/vercel.svg", code=307)
@@ -89,7 +87,7 @@ def diag_env():
 @app.get("/diag_sheets")
 def diag_sheets():
     try:
-        # lazy import → kalau ENV salah, halaman lain tetap hidup
+        # lazy import → kalau ENV salah, halaman lain tetap bisa dibuka
         from sheets_io import _client, SHEET_ID
         gc = _client()
         sh = gc.open_by_key(SHEET_ID)
@@ -155,7 +153,25 @@ def api_series_year():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+# ---- dropdown helper (baru) ----
+@app.get("/api/years")
+def api_years():
+    try:
+        from sheets_io import list_years
+        return jsonify({"ok": True, "years": list_years()}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-# ===================== Run lokal saja =====================
+@app.get("/api/months")
+def api_months():
+    try:
+        from sheets_io import list_months
+        year = request.args.get("year", type=int)
+        return jsonify({"ok": True, "months": list_months(year)}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ===================== Run lokal =====================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
