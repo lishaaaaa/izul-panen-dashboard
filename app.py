@@ -126,6 +126,7 @@ def diag():
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "trace": traceback.format_exc()}, 500
+        
 @app.get("/test")
 def test_alive():
     return "alive", 200
