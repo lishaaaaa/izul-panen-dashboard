@@ -1,61 +1,190 @@
 <!doctype html>
 <html lang="id">
 <head>
-  <meta charset="utf-8">
-  <title>{{ title or "Izul Janjang Dashboard" }}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{{ title }}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    body{font-family:system-ui, Arial, sans-serif;margin:24px;}
-    .top{display:flex;justify-content:space-between;align-items:center;}
-    .badge{background:#e8f1ff;border:1px solid #bcd6ff;padding:.35rem .6rem;border-radius:999px;}
-    .err{background:#fde2e2;border:1px solid #f5b5b5;padding:10px;border-radius:8px;margin-bottom:12px;white-space:pre-wrap;}
-    table{width:100%;border-collapse:collapse;margin-top:10px;}
-    th,td{border:1px solid #e6e6e6;padding:.5rem .6rem;}
-    th{background:#fafafa;text-align:left}
-    .card{border:1px solid #e6e6e6;border-radius:12px;margin-top:16px;padding:12px;}
-    select{padding:.4rem .6rem;border-radius:8px;border:1px solid #ccc;}
-    .seksi-title{margin:0 0 6px 0}
+    body{ background:#fff; }
+    .metric-badge{ border-radius: 16px; padding:.45rem .75rem; background:#f6f7fb; border:1px solid #e8e9ef; }
+    .section-card{ border:1px solid #eef0f4; border-radius:14px; }
+    .fixed-legend{ min-height:28px; }
+    canvas{ max-height: 320px; }
   </style>
 </head>
-<body>
-  <div class="top">
-    <h2>{{ title or "Izul Janjang Dashboard" }}</h2>
-    <div>
-      <a href="{{ url_for('logout') }}" class="badge">Logout</a>
+<body class="p-3 p-md-4">
+
+  <div class="container-fluid">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h3 class="fw-bold m-0">{{ title }}</h3>
+      <a href="/logout" class="btn btn-outline-secondary btn-sm">Logout</a>
     </div>
-  </div>
 
-  {% if error %}
-    <div class="err">{{ error }}</div>
-  {% endif %}
+    <!-- PILIH TANGGAL -->
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <label class="fw-semibold me-2">Pilih Tanggal:</label>
+      <form method="get" action="/dashboard" id="dateForm">
+        <select name="date" class="form-select d-inline-block" style="width:auto" onchange="document.getElementById('dateForm').submit()">
+          {% for d in dates %}
+            <option value="{{ d.label }}" {{ 'selected' if d.label == selected_date else '' }}>{{ d.label }}</option>
+          {% endfor %}
+        </select>
+        <span class="badge bg-primary ms-2">Total Tanggal Ini: {{ day_total }}</span>
+        {% for s in sections_order %}
+          <span class="metric-badge ms-2">{{ s }}: {{ sections_total.get(s,0) }}</span>
+        {% endfor %}
+      </form>
+    </div>
 
-  <form method="get" action="{{ url_for('dashboard') }}">
-    <label>Pilih Tanggal:</label>
-    <select name="tanggal" onchange="this.form.submit()">
-      {% for t in tanggal_list %}
-        <option value="{{ t }}" {{ "selected" if t==tanggal_selected else "" }}>{{ t }}</option>
-      {% endfor %}
-    </select>
-    <span class="badge">Total Hari Ini: {{ total_hari_ini }}</span>
-  </form>
+    {% if message %}
+      <div class="alert alert-info">{{ message }}</div>
+    {% endif %}
 
-  {% if seksi_blocks %}
-    {% for seksi, blk in seksi_blocks.items() %}
-      <div class="card">
-        <h3 class="seksi-title">{{ seksi }}</h3>
-        <table>
-          <thead><tr><th>Nama Pemanen</th><th>Jumlah Janjang</th></tr></thead>
-          <tbody>
-            {% for r in blk.rows %}
-              <tr><td>{{ r.nama }}</td><td>{{ r.janjang }}</td></tr>
-            {% endfor %}
-            <tr><th>Total</th><th>{{ blk.total }}</th></tr>
-          </tbody>
-        </table>
+    <!-- TABEL PER SEKSI -->
+    {% for s in sections_order %}
+      <div class="card section-card mb-3">
+        <div class="card-header bg-white fw-bold">{{ s }}</div>
+        <div class="card-body p-0">
+          <table class="table table-sm table-hover m-0">
+            <thead class="table-light">
+              <tr>
+                <th style="width:50%">Nama Pemanen</th>
+                <th class="text-end">Jumlah Janjang</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% if sections_table.get(s) and sections_table.get(s)|length>0 %}
+              {% for name,val in sections_table.get(s) %}
+                <tr>
+                  <td>{{ name }}</td>
+                  <td class="text-end">{{ val }}</td>
+                </tr>
+              {% endfor %}
+            {% else %}
+              <tr><td colspan="2" class="text-muted">-</td></tr>
+            {% endif %}
+            </tbody>
+            <tfoot class="table-light">
+              <tr>
+                <th>Total {{ s }}</th>
+                <th class="text-end">{{ sections_total.get(s,0) }}</th>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       </div>
     {% endfor %}
-  {% else %}
-    <p>Tidak ada data untuk tanggal yang dipilih.</p>
-  {% endif %}
+
+    <!-- GRAFIK PER SEKSI (Bulanan & Tahunan) -->
+    <div class="row g-3 mt-4">
+      {% for s in sections_order %}
+        <div class="col-12">
+          <h6 class="fw-bold mb-2">{{ s }}</h6>
+        </div>
+        <div class="col-12 col-lg-6">
+          <div class="card section-card">
+            <div class="card-header bg-white">Bulanan ({{ "%04d"|format(selected_year) }}-{{ "%02d"|format(selected_month) }})</div>
+            <div class="card-body"><canvas id="chart_month_{{ loop.index }}"></canvas></div>
+          </div>
+        </div>
+        <div class="col-12 col-lg-6">
+          <div class="card section-card">
+            <div class="card-header bg-white">Tahunan ({{ "%04d"|format(selected_year) }})</div>
+            <div class="card-body"><canvas id="chart_year_{{ loop.index }}"></canvas></div>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>
+    // ====== Data dari server ======
+    const rowsCompact = {{ rows_compact|tojson }};
+    const sectionsOrder = {{ sections_order|tojson }};
+    const selectedYear  = {{ selected_year|int }};
+    const selectedMonth = {{ selected_month|int }};
+
+    // Helper: group by key
+    function groupBy(arr, keyFn) {
+      const m = new Map();
+      for (const it of arr) {
+        const k = keyFn(it);
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(it);
+      }
+      return m;
+    }
+
+    // Sum helper
+    const sum = arr => arr.reduce((a,b)=>a+b,0);
+
+    // Aggregate per day in a month for a section
+    function makeMonthlySeries(section, year, month) {
+      // filter rows: section sama, date di bulan & tahun terpilih
+      const filtered = rowsCompact.filter(r => 
+        r.section === section && r.date_iso && 
+        new Date(r.date_iso).getFullYear() === year &&
+        (new Date(r.date_iso).getMonth()+1) === month
+      );
+      // group by day
+      const byDay = groupBy(filtered, r => new Date(r.date_iso).getDate());
+      // label 1..31
+      const daysInMonth = new Date(year, month, 0).getDate();
+      const labels = Array.from({length: daysInMonth}, (_,i)=> i+1);
+      const data = labels.map(d => sum((byDay.get(d)||[]).map(x=>x.total)));
+      return { labels, data };
+    }
+
+    // Aggregate per month in a year for a section
+    function makeYearlySeries(section, year) {
+      const filtered = rowsCompact.filter(r => 
+        r.section === section && r.date_iso && 
+        new Date(r.date_iso).getFullYear() === year
+      );
+      const byMonth = groupBy(filtered, r => (new Date(r.date_iso).getMonth()+1));
+      const labels = [1,2,3,4,5,6,7,8,9,10,11,12];
+      const data = labels.map(m => sum((byMonth.get(m)||[]).map(x=>x.total)));
+      return { labels, data };
+    }
+
+    function drawLine(id, labels, data) {
+      const ctx = document.getElementById(id);
+      if (!ctx) return;
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Janjang',
+            data,
+            tension: .25,
+            fill: true
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            y: { beginAtZero: true }
+          },
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
+    }
+
+    // render semua seksi
+    sectionsOrder.forEach((sec, idx) => {
+      const m = makeMonthlySeries(sec, selectedYear, selectedMonth);
+      drawLine(`chart_month_${idx+1}`, m.labels, m.data);
+
+      const y = makeYearlySeries(sec, selectedYear);
+      drawLine(`chart_year_${idx+1}`, y.labels.map(n => String(n).padStart(2,'0')), y.data);
+    });
+  </script>
 </body>
 </html>
