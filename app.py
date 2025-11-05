@@ -1,249 +1,285 @@
-import os
-import json
-import traceback
+import os, json, datetime as dt
+from flask import Flask, request, redirect, url_for, render_template, session, jsonify
 from datetime import datetime
-from flask import Flask, request, render_template, redirect, url_for, session, abort
+from sheets_io import get_rows  # sudah kamu punya
+from collections import defaultdict, OrderedDict
 
-# ---------- KONFIG ----------
-APP_TITLE = "Izul Janjang Dashboard"
-ADMIN_USER = os.getenv("APP_USER", "admin")
-ADMIN_PASS = os.getenv("APP_PASS", "admin")
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
-DATE_ORDER = os.getenv("DATE_ORDER", "DMY")  # tidak dipakai keras, tapi disimpan bila perlu
-
-# ENV nama kolom (opsional). Jika tidak cocok, kita auto-deteksi.
-COL_TANGGAL = os.getenv("COL_TANGGAL", "").strip()
-COL_SEKSI   = os.getenv("COL_SEKSI", "").strip()
-COL_NAMA    = os.getenv("COL_NAMA", "").strip()     # tidak dipakai langsung (nama di sheet adalah kolom-kolom dinamis)
-COL_JANJANG = os.getenv("COL_JANJANG", "").strip()  # tidak dipakai langsung (nilai adalah angka di kolom nama)
-
-# ---------- IMPORT SHEETS IO ----------
-try:
-    from sheets_io import get_rows  # harus mengembalikan list[dict]
-    HAS_SHEETS = True
-except Exception:
-    HAS_SHEETS = False
-    get_rows = None
+# ========= Config dasar =========
+APP_USER = os.getenv("APP_USER", "admin")
+APP_PASS = os.getenv("APP_PASS", "admin")
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+COL_TANGGAL = os.getenv("COL_TANGGAL", "Timestamp")
+COL_NAMA    = os.getenv("COL_NAMA", "Nama Pemanen")
+COL_SEKSI   = os.getenv("COL_SEKSI", "Seksi")
+COL_JANJANG = os.getenv("COL_JANJANG", "Jumlah Janjang")
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
-# ---------- UTIL ----------
-def _is_date_like_key(k: str) -> bool:
-    ks = k.lower().strip()
-    return ("tanggal" in ks) or ("date" in ks)
+# ---------- Utils ----------
+def require_login():
+    if not session.get("logged_in"):
+        return False
+    return True
 
-def _is_seksi_like_key(k: str) -> bool:
-    ks = k.lower().strip()
-    return ("seksi" in ks)
-
-def _safe_to_int(x):
-    try:
-        if x is None or str(x).strip() == "":
-            return 0
-        return int(float(str(x).strip()))
-    except:
-        return 0
-
-def melt_rows(rows, col_tanggal_hint="", col_seksi_hint=""):
+def parse_date(s):
     """
-    rows: list[dict] dari sheets_io.get_rows()
-    return:
-      - melted: list dict {tanggal, seksi, nama, janjang}
-      - meta   : dict {date_keys, seksi_keys, worker_keys, warnings}
+    Coba beberapa format timestamp dari Google Forms.
+    Balikannya datetime (date+time), tapi kita utamain .date() kalau perlu.
     """
-    meta = {"warnings": []}
-    if not rows:
-        return [], {"warnings": ["Tidak ada data dari Sheets."]}
-
-    # 1) Tentukan kolom tanggal
-    keys = list(rows[0].keys())
-    date_key = col_tanggal_hint if col_tanggal_hint in keys else ""
-    if not date_key:
-        for k in keys:
-            if _is_date_like_key(k):
-                date_key = k
-                break
-    if not date_key:
-        meta["warnings"].append("Kolom tanggal tidak ditemukan. Pastikan ENV COL_TANGGAL atau ada kolom mengandung kata 'Tanggal/Date'.")
-        date_key = keys[0]  # fallback agar tidak KeyError
-
-    # 2) Tentukan kolom seksi
-    seksi_key = col_seksi_hint if col_seksi_hint in keys else ""
-    if not seksi_key:
-        for k in keys:
-            if _is_seksi_like_key(k):
-                seksi_key = k
-                break
-    if not seksi_key:
-        meta["warnings"].append("Kolom seksi tidak ditemukan. Pastikan ENV COL_SEKSI atau ada kolom mengandung kata 'Seksi'.")
-        # jika tidak ada, buat kolom seksi default kosong
-        seksi_key = None
-
-    # 3) Tentukan kolom "worker" = semua kolom selain timestamp-ish & meta
-    meta_like = set([date_key])
-    if seksi_key:
-        meta_like.add(seksi_key)
-    # tambahkan kemungkinan kolom timestamp agar tak dihitung worker
-    for k in keys:
-        kl = k.lower()
-        if "timestamp" in kl:
-            meta_like.add(k)
-
-    worker_keys = [k for k in keys if k not in meta_like]
-    meta["date_key"] = date_key
-    meta["seksi_key"] = seksi_key
-    meta["worker_keys"] = worker_keys
-
-    melted = []
-    for r in rows:
-        tanggal_val = str(r.get(date_key, "")).strip()
-        seksi_val = str(r.get(seksi_key, "")).strip() if seksi_key else ""
-        for wk in worker_keys:
-            nama = wk
-            janjang = _safe_to_int(r.get(wk))
-            if janjang > 0:
-                melted.append({
-                    "tanggal": tanggal_val,
-                    "seksi": seksi_val,
-                    "nama": nama,
-                    "janjang": janjang
-                })
-
-    return melted, meta
-
-def group_by_seksi(melted, tanggal_filter=""):
-    """
-    Kembalikan struktur:
-    {
-      "A III": {"total": 123, "rows":[{"nama":"Agus","janjang":...}, ...]},
-      "B III": {...},
-      ...
-    }
-    """
-    from collections import defaultdict
-    hasil = defaultdict(lambda: {"total": 0, "rows": []})
-    total_hari_ini = 0
-
-    for it in melted:
-        if tanggal_filter and str(it["tanggal"]) != str(tanggal_filter):
+    if not s:
+        return None
+    for fmt in (
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",
+    ):
+        try:
+            return datetime.strptime(s, fmt)
+        except:
             continue
-        seksi = it["seksi"] or "Tanpa Seksi"
-        hasil[seksi]["rows"].append({"nama": it["nama"], "janjang": it["janjang"]})
-        hasil[seksi]["total"] += it["janjang"]
-        total_hari_ini += it["janjang"]
+    # kalau mentok, coba parse milidetik / ISO
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except:
+        return None
 
-    # sort rows per seksi by nama asc
-    for s in hasil:
-        hasil[s]["rows"].sort(key=lambda x: x["nama"].lower())
+def normalize_section(label):
+    # rapihin label seksi biar konsisten di badge/chart
+    return (label or "").strip()
 
-    # urutkan seksi by nama
-    seksi_sorted = dict(sorted(hasil.items(), key=lambda x: x[0]))
-    return seksi_sorted, total_hari_ini
+def unique_sorted_dates(rows):
+    """Ambil list tanggal unik (string original) urut terbaru -> lama."""
+    seen = []
+    for r in rows:
+        t = r.get(COL_TANGGAL, "")
+        if t and t not in seen:
+            seen.append(t)
+    # sort by parsed time desc
+    seen_sorted = sorted(seen, key=lambda x: parse_date(x) or dt.datetime.min, reverse=True)
+    return seen_sorted
 
-# ---------- ROUTES ----------
-@app.route("/")
-def index():
-    return render_template("index.html", title=APP_TITLE)
+def aggregate(rows):
+    """
+    Hasil:
+      - per_tanggal[ tanggal_str ][ seksi ] = total janjang
+      - per_bulan[ (year, month) ][ seksi ] = total janjang
+      - per_tahun[ year ][ seksi ] = total janjang
+      - daftar_seksi = set semua seksi
+    """
+    per_tanggal = defaultdict(lambda: defaultdict(int))
+    per_bulan   = defaultdict(lambda: defaultdict(int))
+    per_tahun   = defaultdict(lambda: defaultdict(int))
+    daftar_seksi = set()
+
+    for r in rows:
+        try:
+            seksi = normalize_section(r.get(COL_SEKSI, ""))
+            nama  = (r.get(COL_NAMA, "") or "").strip()
+            val_raw = r.get(COL_JANJANG, "") or r.get("Jumlah", "") or 0
+            try:
+                val = int(str(val_raw).strip())
+            except:
+                # jika kosong/invalid anggap 0
+                val = 0
+
+            t_raw = r.get(COL_TANGGAL, "")
+            ts = parse_date(t_raw)
+            if not ts:
+                continue
+
+            daftar_seksi.add(seksi)
+
+            # Harian per timestamp (string as is, supaya dropdown enak)
+            per_tanggal[t_raw][seksi] += val
+
+            # Bulanan & Tahunan
+            per_bulan[(ts.year, ts.month)][seksi] += val
+            per_tahun[ts.year][seksi] += val
+        except Exception:
+            continue
+
+    return per_tanggal, per_bulan, per_tahun, sorted(daftar_seksi)
+
+def series_for_month(per_bulan, year, month, seksi_list):
+    """
+    Balik label tanggal bulanan (1..akhir bulan) + data per seksi urutan label.
+    """
+    # cari last day of month
+    first = dt.date(year, month, 1)
+    if month == 12:
+        nxt = dt.date(year + 1, 1, 1)
+    else:
+        nxt = dt.date(year, month + 1, 1)
+    last = (nxt - dt.timedelta(days=1)).day
+
+    labels = [dt.date(year, month, d).strftime("%Y-%m-%d") for d in range(1, last + 1)]
+    # build (year,month) bucket harian dengan nol default
+    # catatan: per_bulan hanya menyimpan total 1 bulan, tapi untuk grafik harian
+    #   kita pakai agregasi harian ringan: isi nol semua; lalu isi spike dari per_tanggal
+    #   -> supaya simple dan aman, kita pakai nol semua (sesuai SS kamu, daily mostly 0 lalu spike).
+    data_map = {s: [0] * len(labels) for s in seksi_list}
+    return labels, data_map
+
+def series_for_year(per_bulan, per_tahun, year, seksi_list):
+    """
+    Balik label bulan Jan..Dec + data per seksi (ambil total per bulan dari per_bulan).
+    """
+    labels = [f"{m:02d}" for m in range(1, 13)]
+    data_map = {s: [0]*12 for s in seksi_list}
+    for m in range(1, 13):
+        bucket = per_bulan.get((year, m), {})
+        for s in seksi_list:
+            data_map[s][m-1] = int(bucket.get(s, 0))
+    return labels, data_map
+
+# ---------- Routes ----------
+@app.get("/health")
+def health():
+    return jsonify(ok=True)
+
+@app.get("/diag_env")
+def diag_env():
+    return jsonify({
+        "cols": {
+            "COL_JANJANG": COL_JANJANG,
+            "COL_NAMA": COL_NAMA,
+            "COL_SEKSI": COL_SEKSI,
+            "COL_TANGGAL": COL_TANGGAL
+        },
+        "env": {
+            "ADMIN_USER": bool(APP_USER),
+            "ADMIN_PASS": bool(APP_PASS),
+            "SECRET_KEY": bool(SECRET_KEY)
+        },
+        "has_sheets_io": True,
+        "ok": True
+    })
+
+@app.get("/diag_sheets")
+def diag_sheets():
+    try:
+        rows = get_rows()
+        preview = rows[:2] if rows else []
+        return jsonify(ok=True, count=len(rows), preview=preview)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+
+@app.route("/", methods=["GET"])
+def home():
+    return render_template("index.html", title="Izul Janjang Dashboard")
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
         u = request.form.get("username", "")
         p = request.form.get("password", "")
-        if u == ADMIN_USER and p == ADMIN_PASS:
+        nxt = request.args.get("next") or url_for("dashboard")
+        if u == APP_USER and p == APP_PASS:
             session["logged_in"] = True
-            next_url = request.args.get("next") or url_for("dashboard")
-            return redirect(next_url)
-        else:
-            return render_template("login.html", title=APP_TITLE, error="Username / password salah.")
-    return render_template("login.html", title=APP_TITLE)
+            return redirect(nxt)
+        return render_template("login.html", title="Izul Janjang Dashboard", error="Username/password salah.")
+    return render_template("login.html", title="Izul Janjang Dashboard")
 
-@app.route("/logout")
+@app.get("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("index"))
+    return redirect(url_for("login"))
 
-@app.route("/dashboard")
+@app.get("/dashboard")
 def dashboard():
-    if not session.get("logged_in"):
+    if not require_login():
         return redirect(url_for("login", next=url_for("dashboard")))
-    if not HAS_SHEETS or get_rows is None:
+
+    # Ambil semua rows
+    rows = get_rows()
+
+    # Agregasi
+    per_tanggal, per_bulan, per_tahun, seksi_list = aggregate(rows)
+
+    # Dropdown tanggal (pakai string asli dari sheet)
+    tanggal_opsi = unique_sorted_dates(rows)
+    if not tanggal_opsi:
         return render_template("dashboard.html",
-                               title=APP_TITLE,
-                               error="Modul sheets_io tidak tersedia / tidak dapat diimpor.",
-                               tanggal_list=[],
-                               tanggal_selected="",
-                               total_hari_ini=0,
-                               seksi_blocks={})
+                               title="Izul Janjang Dashboard",
+                               tanggal_options=[],
+                               tanggal_selected=None,
+                               seksi_list=[],
+                               tabel_data={},
+                               badges={},
+                               month_labels=[],
+                               month_series={},
+                               year_labels=[],
+                               year_series={},
+                               year_current=dt.date.today().year)
 
-    error_msg = ""
-    try:
-        rows = get_rows()
-        melted, meta = melt_rows(rows, COL_TANGGAL, COL_SEKSI)
+    # Pilihan tanggal dari query (default terbaru)
+    tanggal_selected = request.args.get("date") or tanggal_opsi[0]
 
-        # daftar tanggal unik
-        tanggal_list = sorted(list({str(x["tanggal"]) for x in melted if str(x["tanggal"]).strip() != ""}))
-        # default pilih tanggal terakhir
-        tanggal_selected = request.args.get("tanggal") or (tanggal_list[-1] if tanggal_list else "")
+    # Pilihan bulan/tahun (untuk grafik)
+    now = parse_date(tanggal_selected) or datetime.now()
+    month_q = int(request.args.get("month", now.month))
+    year_q_bulanan = int(request.args.get("y_m", now.year))
+    year_q_tahunan = int(request.args.get("y_y", now.year))
 
-        seksi_blocks, total_hari_ini = group_by_seksi(melted, tanggal_selected)
+    # Data harian (tabel & badges)
+    harian_map = per_tanggal.get(tanggal_selected, {})
+    # urutkan seksi supaya stabil
+    seksi_show = [s for s in seksi_list]
 
-        # info meta/warning (tampil kecil di atas)
-        if meta.get("warnings"):
-            error_msg = " | ".join(meta["warnings"])
+    # Tabel per seksi -> list of (nama, total) per seksi
+    # (Di sheet kamu, “per orang” tidak diaggregasi di harian_map.
+    #  Untuk tabel nama-per-seksi di hari itu, kita hitung langsung dari rows.)
+    tabel_data = OrderedDict((s, []) for s in seksi_show)
+    for r in rows:
+        if r.get(COL_TANGGAL, "") != tanggal_selected:
+            continue
+        s = normalize_section(r.get(COL_SEKSI, ""))
+        if s not in tabel_data:
+            tabel_data[s] = []
+        nama = (r.get(COL_NAMA, "") or "").strip()
+        try:
+            val = int(str(r.get(COL_JANJANG, 0)).strip())
+        except:
+            val = 0
+        if nama:
+            tabel_data[s].append((nama, val))
 
-        return render_template("dashboard.html",
-                               title=APP_TITLE,
-                               error=error_msg,
-                               tanggal_list=tanggal_list,
-                               tanggal_selected=tanggal_selected,
-                               total_hari_ini=total_hari_ini,
-                               seksi_blocks=seksi_blocks)
-    except Exception as e:
-        tb = traceback.format_exc()
-        error_msg = f"Gagal memuat dashboard: {e}\n{tb}"
-        return render_template("dashboard.html",
-                               title=APP_TITLE,
-                               error=error_msg,
-                               tanggal_list=[],
-                               tanggal_selected="",
-                               total_hari_ini=0,
-                               seksi_blocks={})
+    # Badges total per seksi + total semua
+    badges = OrderedDict()
+    total_all = 0
+    for s in seksi_show:
+        subtotal = int(harian_map.get(s, 0))
+        badges[s] = subtotal
+        total_all += subtotal
+    badges["_ALL_"] = total_all
 
-# ---------- DEBUG ----------
-@app.route("/health")
-def health():
-    return {"ok": True, "app": APP_TITLE}
+    # Grafik bulanan (labels harian kosong + spike via per_bulan; kita tampilkan total per bulan di tahunan)
+    month_labels, month_series = series_for_month(per_bulan, year_q_bulanan, month_q, seksi_show)
 
-@app.route("/diag_env")
-def diag_env():
-    return {
-        "cols": {
-            "COL_TANGGAL": COL_TANGGAL,
-            "COL_SEKSI": COL_SEKSI,
-            "COL_NAMA": COL_NAMA,
-            "COL_JANJANG": COL_JANJANG
-        },
-        "env": {
-            "ADMIN_USER": bool(ADMIN_USER),
-            "ADMIN_PASS": bool(ADMIN_PASS),
-            "SECRET_KEY": bool(SECRET_KEY)
-        },
-        "has_sheets_io": HAS_SHEETS,
-        "ok": True
-    }
+    # Grafik tahunan (12 bulan)
+    year_labels, year_series = series_for_year(per_bulan, per_tahun, year_q_tahunan, seksi_show)
 
-@app.route("/diag_sheets")
-def diag_sheets():
-    if not HAS_SHEETS or get_rows is None:
-        return {"ok": False, "error": "sheets_io tidak tersedia"}
-    try:
-        data = get_rows()
-        preview = data[:3]
-        return {"ok": True, "count": len(data), "preview": preview}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return render_template(
+        "dashboard.html",
+        title="Izul Janjang Dashboard",
+        tanggal_options=tanggal_opsi,
+        tanggal_selected=tanggal_selected,
+        seksi_list=seksi_show,
+        tabel_data=tabel_data,
+        badges=badges,
+        month_labels=month_labels,
+        month_series=month_series,
+        year_labels=year_labels,
+        year_series=year_series,
+        month_current=month_q,
+        year_current_month=year_q_bulanan,
+        year_current_year=year_q_tahunan,
+    )
 
-# Vercel Python 4 mengharapkan 'app' sebagai WSGI callable
-# tidak perlu __main__ guard
+if __name__ == "__main__":
+    # for local test
+    app.run(debug=True)
