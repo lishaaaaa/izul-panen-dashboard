@@ -1,220 +1,249 @@
-import os, json
+import os
+import json
+import traceback
 from datetime import datetime
-from functools import wraps
+from flask import Flask, request, render_template, redirect, url_for, session, abort
 
-from flask import (
-    Flask, render_template, request, redirect,
-    url_for, session, jsonify, make_response
-)
-from jinja2 import TemplateNotFound
+# ---------- KONFIG ----------
+APP_TITLE = "Izul Janjang Dashboard"
+ADMIN_USER = os.getenv("APP_USER", "admin")
+ADMIN_PASS = os.getenv("APP_PASS", "admin")
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
+DATE_ORDER = os.getenv("DATE_ORDER", "DMY")  # tidak dipakai keras, tapi disimpan bila perlu
+
+# ENV nama kolom (opsional). Jika tidak cocok, kita auto-deteksi.
+COL_TANGGAL = os.getenv("COL_TANGGAL", "").strip()
+COL_SEKSI   = os.getenv("COL_SEKSI", "").strip()
+COL_NAMA    = os.getenv("COL_NAMA", "").strip()     # tidak dipakai langsung (nama di sheet adalah kolom-kolom dinamis)
+COL_JANJANG = os.getenv("COL_JANJANG", "").strip()  # tidak dipakai langsung (nilai adalah angka di kolom nama)
+
+# ---------- IMPORT SHEETS IO ----------
+try:
+    from sheets_io import get_rows  # harus mengembalikan list[dict]
+    HAS_SHEETS = True
+except Exception:
+    HAS_SHEETS = False
+    get_rows = None
 
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
-app.config.update(
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=True,
-)
+app.secret_key = SECRET_KEY
 
-TITLE = "Izul Janjang Dashboard"
+# ---------- UTIL ----------
+def _is_date_like_key(k: str) -> bool:
+    ks = k.lower().strip()
+    return ("tanggal" in ks) or ("date" in ks)
 
-# ---- ENV (login & sheets) ----
-APP_USER = (os.getenv("APP_USER") or "").strip()
-APP_PASS = (os.getenv("APP_PASS") or "").strip()
-DEBUG_KEY = os.getenv("DEBUG_KEY", "")  # opsional, untuk force login testing
+def _is_seksi_like_key(k: str) -> bool:
+    ks = k.lower().strip()
+    return ("seksi" in ks)
 
-SHEET_ID  = os.getenv("SHEET_ID", "")
-SHEET_TAB = os.getenv("SHEET_TAB", "Form Responses 1")
-
-COL_TANGGAL = os.getenv("COL_TANGGAL", "Tanggal")
-COL_SEKSI   = os.getenv("COL_SEKSI", "Seksi")
-COL_NAMA    = os.getenv("COL_NAMA", "Nama Pemanen")
-COL_JANJANG = os.getenv("COL_JANJANG", "Jumlah Janjang")
-DATE_ORDER  = (os.getenv("DATE_ORDER") or "dmy").lower()
-
-# ---- import sheets_io.get_rows() ----
-try:
-    from sheets_io import get_rows   # harus ada di repo-mu
-    HAS_SHEETS = True
-except Exception as e:
-    HAS_SHEETS = False
-    _import_err = str(e)
-    def get_rows(*args, **kwargs):
-        raise RuntimeError("get_rows() tidak tersedia: " + _import_err)
-
-# ---- helpers ----
-def _parse_date(s: str):
-    if not s: return None
-    s = str(s).strip()
-    fmts = {
-        "dmy": ["%d/%m/%Y","%d-%m-%Y","%Y-%m-%d","%m/%d/%Y"],
-        "mdy": ["%m/%d/%Y","%m-%d-%Y","%Y-%m-%d","%d/%m/%Y"],
-        "ymd": ["%Y-%m-%d","%d/%m/%Y","%m/%d/%Y"],
-    }[DATE_ORDER if DATE_ORDER in ("dmy","mdy","ymd") else "dmy"]
-    for f in fmts:
-        try: return datetime.strptime(s, f)
-        except ValueError: pass
-    return None
-
-def login_required(view):
-    @wraps(view)
-    def wrapped(*a, **kw):
-        if not session.get("auth"):
-            nxt = request.path if request.method == "GET" else url_for("dashboard")
-            return redirect(url_for("login", next=nxt))
-        return view(*a, **kw)
-    return wrapped
-
-# ---- diagnostics ----
-@app.route("/health")
-def health(): return {"ok": True, "app": "izul-janjang-dashboard"}
-
-@app.route("/diag_env")
-def diag_env():
-    return jsonify({
-        "cols": {
-            "COL_JANJANG": COL_JANJANG,
-            "COL_NAMA": COL_NAMA,
-            "COL_SEKSI": COL_SEKSI,
-            "COL_TANGGAL": COL_TANGGAL,
-        },
-        "env": {
-            "ADMIN_USER": bool(APP_USER),
-            "ADMIN_PASS": bool(APP_PASS),
-            "SECRET_KEY": bool(app.secret_key),
-        },
-        "has_sheets_io": HAS_SHEETS,
-        "ok": True
-    })
-
-@app.route("/diag_sheets")
-def diag_sheets():
-    if not HAS_SHEETS:
-        return jsonify({"ok": False, "error": "get_rows() tidak tersedia di sheets_io"})
-    if not SHEET_ID:
-        return jsonify({"ok": False, "error": "ENV SHEET_ID belum diisi"})
+def _safe_to_int(x):
     try:
-        rows = get_rows(SHEET_ID, SHEET_TAB)
-        return jsonify({"ok": True, "count": len(rows), "preview": rows[:3]})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+        if x is None or str(x).strip() == "":
+            return 0
+        return int(float(str(x).strip()))
+    except:
+        return 0
 
-# ---- landing ----
+def melt_rows(rows, col_tanggal_hint="", col_seksi_hint=""):
+    """
+    rows: list[dict] dari sheets_io.get_rows()
+    return:
+      - melted: list dict {tanggal, seksi, nama, janjang}
+      - meta   : dict {date_keys, seksi_keys, worker_keys, warnings}
+    """
+    meta = {"warnings": []}
+    if not rows:
+        return [], {"warnings": ["Tidak ada data dari Sheets."]}
+
+    # 1) Tentukan kolom tanggal
+    keys = list(rows[0].keys())
+    date_key = col_tanggal_hint if col_tanggal_hint in keys else ""
+    if not date_key:
+        for k in keys:
+            if _is_date_like_key(k):
+                date_key = k
+                break
+    if not date_key:
+        meta["warnings"].append("Kolom tanggal tidak ditemukan. Pastikan ENV COL_TANGGAL atau ada kolom mengandung kata 'Tanggal/Date'.")
+        date_key = keys[0]  # fallback agar tidak KeyError
+
+    # 2) Tentukan kolom seksi
+    seksi_key = col_seksi_hint if col_seksi_hint in keys else ""
+    if not seksi_key:
+        for k in keys:
+            if _is_seksi_like_key(k):
+                seksi_key = k
+                break
+    if not seksi_key:
+        meta["warnings"].append("Kolom seksi tidak ditemukan. Pastikan ENV COL_SEKSI atau ada kolom mengandung kata 'Seksi'.")
+        # jika tidak ada, buat kolom seksi default kosong
+        seksi_key = None
+
+    # 3) Tentukan kolom "worker" = semua kolom selain timestamp-ish & meta
+    meta_like = set([date_key])
+    if seksi_key:
+        meta_like.add(seksi_key)
+    # tambahkan kemungkinan kolom timestamp agar tak dihitung worker
+    for k in keys:
+        kl = k.lower()
+        if "timestamp" in kl:
+            meta_like.add(k)
+
+    worker_keys = [k for k in keys if k not in meta_like]
+    meta["date_key"] = date_key
+    meta["seksi_key"] = seksi_key
+    meta["worker_keys"] = worker_keys
+
+    melted = []
+    for r in rows:
+        tanggal_val = str(r.get(date_key, "")).strip()
+        seksi_val = str(r.get(seksi_key, "")).strip() if seksi_key else ""
+        for wk in worker_keys:
+            nama = wk
+            janjang = _safe_to_int(r.get(wk))
+            if janjang > 0:
+                melted.append({
+                    "tanggal": tanggal_val,
+                    "seksi": seksi_val,
+                    "nama": nama,
+                    "janjang": janjang
+                })
+
+    return melted, meta
+
+def group_by_seksi(melted, tanggal_filter=""):
+    """
+    Kembalikan struktur:
+    {
+      "A III": {"total": 123, "rows":[{"nama":"Agus","janjang":...}, ...]},
+      "B III": {...},
+      ...
+    }
+    """
+    from collections import defaultdict
+    hasil = defaultdict(lambda: {"total": 0, "rows": []})
+    total_hari_ini = 0
+
+    for it in melted:
+        if tanggal_filter and str(it["tanggal"]) != str(tanggal_filter):
+            continue
+        seksi = it["seksi"] or "Tanpa Seksi"
+        hasil[seksi]["rows"].append({"nama": it["nama"], "janjang": it["janjang"]})
+        hasil[seksi]["total"] += it["janjang"]
+        total_hari_ini += it["janjang"]
+
+    # sort rows per seksi by nama asc
+    for s in hasil:
+        hasil[s]["rows"].sort(key=lambda x: x["nama"].lower())
+
+    # urutkan seksi by nama
+    seksi_sorted = dict(sorted(hasil.items(), key=lambda x: x[0]))
+    return seksi_sorted, total_hari_ini
+
+# ---------- ROUTES ----------
 @app.route("/")
 def index():
-    try:
-        return render_template("index.html", title=TITLE)
-    except Exception:
-        return f"""{TITLE} — Login via /login atau langsung /dashboard bila sudah login.
-Debug: /health, /diag_env, /diag_sheets"""
+    return render_template("index.html", title=APP_TITLE)
 
-# ---- auth ----
-@app.route("/login", methods=["GET","POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    if session.get("auth"):
-        return redirect(request.args.get("next") or url_for("dashboard"))
-
-    error = None
     if request.method == "POST":
-        u = (request.form.get("username") or "").strip()
-        p = (request.form.get("password") or "").strip()
-        next_from_form = (request.form.get("next") or "").strip()
-        if APP_USER and APP_PASS and u == APP_USER and p == APP_PASS:
-            session["auth"] = True
-            return redirect(next_from_form or request.args.get("next") or url_for("dashboard"))
+        u = request.form.get("username", "")
+        p = request.form.get("password", "")
+        if u == ADMIN_USER and p == ADMIN_PASS:
+            session["logged_in"] = True
+            next_url = request.args.get("next") or url_for("dashboard")
+            return redirect(next_url)
         else:
-            error = "Username atau password salah."
-    return render_template("login.html", title=TITLE, error=error)
+            return render_template("login.html", title=APP_TITLE, error="Username / password salah.")
+    return render_template("login.html", title=APP_TITLE)
 
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("login"))
-
-# ---- optional: paksa login untuk tes (akses: /_debug_login?key=XXX) ----
-@app.route("/_debug_login")
-def _debug_login():
-    key = request.args.get("key","")
-    if DEBUG_KEY and key == DEBUG_KEY:
-        session["auth"] = True
-        return redirect(url_for("dashboard"))
-    return "Forbidden", 403
-
-# ---- dashboard ----
-def _load_rows():
-    if not HAS_SHEETS or not SHEET_ID: return []
-    rows = get_rows(SHEET_ID, SHEET_TAB)
-    # normalisasi tanggal
-    out = []
-    for r in rows:
-        r2 = dict(r)
-        r2["_tanggal_parsed"] = _parse_date(r.get(COL_TANGGAL, ""))
-        out.append(r2)
-    return out
+    return redirect(url_for("index"))
 
 @app.route("/dashboard")
-@login_required
 def dashboard():
-    rows = []
-    try:
-        rows = _load_rows()
-    except Exception as e:
-        # kalau gagal ambil data, tetap render template dengan error
-        try:
-            return render_template("dashboard.html",
-                                   title=TITLE, error=str(e),
-                                   rows=[], cols={
-                                       "tanggal": COL_TANGGAL,
-                                       "seksi": COL_SEKSI,
-                                       "nama": COL_NAMA,
-                                       "janjang": COL_JANJANG,
-                                   })
-        except TemplateNotFound:
-            # fallback safe view
-            return _safe_dashboard([], error=str(e))
-
-    # filter opsional ?date=YYYY-MM-DD
-    qdate = (request.args.get("date") or "").strip()
-    if qdate:
-        try:
-            want = datetime.strptime(qdate, "%Y-%m-%d").date()
-            rows = [r for r in rows if r["_tanggal_parsed"] and r["_tanggal_parsed"].date() == want]
-        except ValueError:
-            pass
-
-    # coba render template dashboard milikmu
-    try:
+    if not session.get("logged_in"):
+        return redirect(url_for("login", next=url_for("dashboard")))
+    if not HAS_SHEETS or get_rows is None:
         return render_template("dashboard.html",
-                               title=TITLE, error=None,
-                               rows=rows, cols={
-                                   "tanggal": COL_TANGGAL,
-                                   "seksi": COL_SEKSI,
-                                   "nama": COL_NAMA,
-                                   "janjang": COL_JANJANG,
-                               })
-    except TemplateNotFound:
-        # kalau file tidak ada -> fallback aman
-        return _safe_dashboard(rows)
+                               title=APP_TITLE,
+                               error="Modul sheets_io tidak tersedia / tidak dapat diimpor.",
+                               tanggal_list=[],
+                               tanggal_selected="",
+                               total_hari_ini=0,
+                               seksi_blocks={})
 
-def _safe_dashboard(rows, error=None):
-    # HTML simple supaya SELALU kebuka
-    head = f"<h1 style='margin:10px 0'>{TITLE}</h1>"
-    note = f"<p style='color:#b91c1c'>{error}</p>" if error else ""
-    table_head = f"""
-    <table border="1" cellpadding="6" cellspacing="0">
-      <thead><tr>
-        <th>{COL_TANGGAL}</th><th>{COL_SEKSI}</th><th>{COL_NAMA}</th><th>{COL_JANJANG}</th>
-      </tr></thead><tbody>
-    """
-    body_rows = []
-    for r in rows[:300]:  # batasi tampilan
-        body_rows.append(
-            f"<tr><td>{r.get(COL_TANGGAL,'')}</td>"
-            f"<td>{r.get(COL_SEKSI,'')}</td>"
-            f"<td>{r.get(COL_NAMA,'')}</td>"
-            f"<td>{r.get(COL_JANJANG,'')}</td></tr>"
-        )
-    html = head + note + table_head + "".join(body_rows) + "</tbody></table>"
-    return html
+    error_msg = ""
+    try:
+        rows = get_rows()
+        melted, meta = melt_rows(rows, COL_TANGGAL, COL_SEKSI)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
+        # daftar tanggal unik
+        tanggal_list = sorted(list({str(x["tanggal"]) for x in melted if str(x["tanggal"]).strip() != ""}))
+        # default pilih tanggal terakhir
+        tanggal_selected = request.args.get("tanggal") or (tanggal_list[-1] if tanggal_list else "")
+
+        seksi_blocks, total_hari_ini = group_by_seksi(melted, tanggal_selected)
+
+        # info meta/warning (tampil kecil di atas)
+        if meta.get("warnings"):
+            error_msg = " | ".join(meta["warnings"])
+
+        return render_template("dashboard.html",
+                               title=APP_TITLE,
+                               error=error_msg,
+                               tanggal_list=tanggal_list,
+                               tanggal_selected=tanggal_selected,
+                               total_hari_ini=total_hari_ini,
+                               seksi_blocks=seksi_blocks)
+    except Exception as e:
+        tb = traceback.format_exc()
+        error_msg = f"Gagal memuat dashboard: {e}\n{tb}"
+        return render_template("dashboard.html",
+                               title=APP_TITLE,
+                               error=error_msg,
+                               tanggal_list=[],
+                               tanggal_selected="",
+                               total_hari_ini=0,
+                               seksi_blocks={})
+
+# ---------- DEBUG ----------
+@app.route("/health")
+def health():
+    return {"ok": True, "app": APP_TITLE}
+
+@app.route("/diag_env")
+def diag_env():
+    return {
+        "cols": {
+            "COL_TANGGAL": COL_TANGGAL,
+            "COL_SEKSI": COL_SEKSI,
+            "COL_NAMA": COL_NAMA,
+            "COL_JANJANG": COL_JANJANG
+        },
+        "env": {
+            "ADMIN_USER": bool(ADMIN_USER),
+            "ADMIN_PASS": bool(ADMIN_PASS),
+            "SECRET_KEY": bool(SECRET_KEY)
+        },
+        "has_sheets_io": HAS_SHEETS,
+        "ok": True
+    }
+
+@app.route("/diag_sheets")
+def diag_sheets():
+    if not HAS_SHEETS or get_rows is None:
+        return {"ok": False, "error": "sheets_io tidak tersedia"}
+    try:
+        data = get_rows()
+        preview = data[:3]
+        return {"ok": True, "count": len(data), "preview": preview}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# Vercel Python 4 mengharapkan 'app' sebagai WSGI callable
+# tidak perlu __main__ guard
