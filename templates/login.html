@@ -8,25 +8,19 @@
     body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
     .wrap { max-width: 720px; margin: 0 auto; }
     h1 { margin: 0 0 16px }
-    .nav { margin: 4px 0 24px; font-size: 14px; }
     .card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; background: #fff; max-width: 420px; }
     label { display:block; margin: 10px 0 4px; font-weight:600; }
     input { width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; }
     button { margin-top: 14px; padding:10px 14px; border:0; border-radius: 8px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; }
     .err { color:#b91c1c; margin: 10px 0; }
-    .row { display:flex; gap:16px; align-items:center; }
-    .spacer { flex:1 }
+    .nav { margin-top: 16px; font-size: 14px; }
     a { color:#2563eb; text-decoration:none }
     a:hover { text-decoration:underline }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="row">
-      <h1>{{ title }}</h1>
-      <div class="spacer"></div>
-      <a href="/logout">Logout</a>
-    </div>
+    <h1>{{ title }}</h1>
 
     {% if error %}
       <div class="err">{{ error }}</div>
@@ -34,6 +28,7 @@
 
     <div class="card">
       <form method="post" action="/login">
+        <input type="hidden" name="next" value="{{ request.args.get('next','') }}">
         <label>Username</label>
         <input name="username" autocomplete="username" required>
 
@@ -45,7 +40,7 @@
     </div>
 
     <div class="nav">
-      <p>Debug cepat: <a href="/health">health</a> • <a href="/diag_env">diag_env</a> • <a href="/diag_sheets">diag_sheets</a></p>
+      Debug: <a href="/health">health</a> • <a href="/diag_env">diag_env</a> • <a href="/diag_sheets">diag_sheets</a>
     </div>
   </div>
 </body>
