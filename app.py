@@ -1,285 +1,267 @@
-import os, json, datetime as dt
-from flask import Flask, request, redirect, url_for, render_template, session, jsonify
-from datetime import datetime
-from sheets_io import get_rows  # sudah kamu punya
+import os
+import json
+from datetime import datetime, date
 from collections import defaultdict, OrderedDict
 
-# ========= Config dasar =========
-APP_USER = os.getenv("APP_USER", "admin")
-APP_PASS = os.getenv("APP_PASS", "admin")
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
-COL_TANGGAL = os.getenv("COL_TANGGAL", "Timestamp")
-COL_NAMA    = os.getenv("COL_NAMA", "Nama Pemanen")
-COL_SEKSI   = os.getenv("COL_SEKSI", "Seksi")
-COL_JANJANG = os.getenv("COL_JANJANG", "Jumlah Janjang")
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
+
+import sheets_io as sio  # gunakan versi yang sudah dikirim sebelumnya
+
+# ================== APP CONFIG ==================
+APP_TITLE   = "Izul Janjang Dashboard"
+SECRET_KEY  = os.getenv("SECRET_KEY", "dev-secret-please-change")
+APP_USER    = os.getenv("APP_USER", "admin")
+APP_PASS    = os.getenv("APP_PASS", "admin")
+
+# Nama kolom ENV (lihat Settings > Environment Variables di Vercel)
+COL_TANGGAL = os.getenv("COL_TANGGAL", "Hari Tanggal Hari ini").strip()
+COL_SEKSI   = os.getenv("COL_SEKSI", "Masukkan Lokasi Seksi yang di Input").strip()
+
+# Daftar seksi yang ingin ditampilkan urut
+SECTIONS_ORDER = ["A III", "B III", "C II", "D I"]
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
-# ---------- Utils ----------
-def require_login():
-    if not session.get("logged_in"):
-        return False
-    return True
 
-def parse_date(s):
-    """
-    Coba beberapa format timestamp dari Google Forms.
-    Balikannya datetime (date+time), tapi kita utamain .date() kalau perlu.
-    """
-    if not s:
-        return None
-    for fmt in (
-        "%m/%d/%Y %H:%M:%S",
-        "%m/%d/%Y %H:%M",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-        "%d/%m/%Y %H:%M:%S",
-        "%d/%m/%Y",
-    ):
+# ================== SMALL HELPERS ==================
+_FMT_CANDIDATES = ["%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"]
+
+def _try_parse_date(s: str):
+    s = str(s).strip()
+    for fmt in _FMT_CANDIDATES:
         try:
-            return datetime.strptime(s, fmt)
-        except:
-            continue
-    # kalau mentok, coba parse milidetik / ISO
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except:
-        return None
-
-def normalize_section(label):
-    # rapihin label seksi biar konsisten di badge/chart
-    return (label or "").strip()
-
-def unique_sorted_dates(rows):
-    """Ambil list tanggal unik (string original) urut terbaru -> lama."""
-    seen = []
-    for r in rows:
-        t = r.get(COL_TANGGAL, "")
-        if t and t not in seen:
-            seen.append(t)
-    # sort by parsed time desc
-    seen_sorted = sorted(seen, key=lambda x: parse_date(x) or dt.datetime.min, reverse=True)
-    return seen_sorted
-
-def aggregate(rows):
-    """
-    Hasil:
-      - per_tanggal[ tanggal_str ][ seksi ] = total janjang
-      - per_bulan[ (year, month) ][ seksi ] = total janjang
-      - per_tahun[ year ][ seksi ] = total janjang
-      - daftar_seksi = set semua seksi
-    """
-    per_tanggal = defaultdict(lambda: defaultdict(int))
-    per_bulan   = defaultdict(lambda: defaultdict(int))
-    per_tahun   = defaultdict(lambda: defaultdict(int))
-    daftar_seksi = set()
-
-    for r in rows:
-        try:
-            seksi = normalize_section(r.get(COL_SEKSI, ""))
-            nama  = (r.get(COL_NAMA, "") or "").strip()
-            val_raw = r.get(COL_JANJANG, "") or r.get("Jumlah", "") or 0
-            try:
-                val = int(str(val_raw).strip())
-            except:
-                # jika kosong/invalid anggap 0
-                val = 0
-
-            t_raw = r.get(COL_TANGGAL, "")
-            ts = parse_date(t_raw)
-            if not ts:
-                continue
-
-            daftar_seksi.add(seksi)
-
-            # Harian per timestamp (string as is, supaya dropdown enak)
-            per_tanggal[t_raw][seksi] += val
-
-            # Bulanan & Tahunan
-            per_bulan[(ts.year, ts.month)][seksi] += val
-            per_tahun[ts.year][seksi] += val
+            return datetime.strptime(s, fmt).date()
         except Exception:
+            pass
+    return None
+
+def _is_number(x):
+    try:
+        if x is None: 
+            return False
+        s = str(x).strip()
+        if not s: 
+            return False
+        float(s)
+        return True
+    except Exception:
+        return False
+
+def _meta_columns():
+    # kolom yang BUKAN nama pemanen (silakan tambahkan kalau ada kolom meta lain)
+    return set(["Timestamp", "timestamp", COL_TANGGAL, COL_SEKSI])
+
+def _sum_people_in_row(row: dict) -> int:
+    """Jumlahkan semua nilai numerik orang dalam satu baris (exclude kolom meta)."""
+    meta = _meta_columns()
+    total = 0
+    for k, v in row.items():
+        if k in meta:
             continue
+        if _is_number(v):
+            total += float(v)
+    return int(total)
 
-    return per_tanggal, per_bulan, per_tahun, sorted(daftar_seksi)
-
-def series_for_month(per_bulan, year, month, seksi_list):
+def _people_counts_from_row(row: dict) -> list[tuple[str, int]]:
     """
-    Balik label tanggal bulanan (1..akhir bulan) + data per seksi urutan label.
+    Ambil pasangan (nama, jumlah) dari satu baris (lebar). 
+    Semua kolom non-meta yang bernilai numerik dianggap nama pemanen.
     """
-    # cari last day of month
-    first = dt.date(year, month, 1)
-    if month == 12:
-        nxt = dt.date(year + 1, 1, 1)
-    else:
-        nxt = dt.date(year, month + 1, 1)
-    last = (nxt - dt.timedelta(days=1)).day
+    meta = _meta_columns()
+    out = []
+    for k, v in row.items():
+        if k in meta:
+            continue
+        if _is_number(v):
+            val = int(float(v))
+            if val != 0:
+                out.append((k, val))
+    return out
 
-    labels = [dt.date(year, month, d).strftime("%Y-%m-%d") for d in range(1, last + 1)]
-    # build (year,month) bucket harian dengan nol default
-    # catatan: per_bulan hanya menyimpan total 1 bulan, tapi untuk grafik harian
-    #   kita pakai agregasi harian ringan: isi nol semua; lalu isi spike dari per_tanggal
-    #   -> supaya simple dan aman, kita pakai nol semua (sesuai SS kamu, daily mostly 0 lalu spike).
-    data_map = {s: [0] * len(labels) for s in seksi_list}
-    return labels, data_map
+def _section_of_row(row: dict) -> str:
+    # akses robust untuk kolom seksi
+    if COL_SEKSI in row:
+        return str(row[COL_SEKSI]).strip()
+    # fallback: cari key yang sama setelah strip
+    for k in row.keys():
+        if k.strip() == COL_SEKSI:
+            return str(row[k]).strip()
+    return ""
 
-def series_for_year(per_bulan, per_tahun, year, seksi_list):
-    """
-    Balik label bulan Jan..Dec + data per seksi (ambil total per bulan dari per_bulan).
-    """
-    labels = [f"{m:02d}" for m in range(1, 13)]
-    data_map = {s: [0]*12 for s in seksi_list}
-    for m in range(1, 13):
-        bucket = per_bulan.get((year, m), {})
-        for s in seksi_list:
-            data_map[s][m-1] = int(bucket.get(s, 0))
-    return labels, data_map
 
-# ---------- Routes ----------
-@app.get("/health")
+# ================== ROUTES (BASIC) ==================
+@app.route("/")
+def home():
+    # Halaman depan ringkas: link ke login/dashboard + debug
+    return render_template("index.html", title=APP_TITLE)
+
+@app.route("/health")
 def health():
-    return jsonify(ok=True)
+    return jsonify(ok=True, app=APP_TITLE)
 
-@app.get("/diag_env")
+@app.route("/diag_env")
 def diag_env():
-    return jsonify({
-        "cols": {
-            "COL_JANJANG": COL_JANJANG,
-            "COL_NAMA": COL_NAMA,
-            "COL_SEKSI": COL_SEKSI,
-            "COL_TANGGAL": COL_TANGGAL
-        },
+    info = {
         "env": {
             "ADMIN_USER": bool(APP_USER),
             "ADMIN_PASS": bool(APP_PASS),
-            "SECRET_KEY": bool(SECRET_KEY)
+            "SECRET_KEY": bool(SECRET_KEY),
         },
-        "has_sheets_io": True,
-        "ok": True
-    })
+        "cols": {
+            "COL_TANGGAL": COL_TANGGAL,
+            "COL_SEKSI": COL_SEKSI,
+        },
+        "has_sheets_io": True
+    }
+    return jsonify({"ok": True, **info})
 
-@app.get("/diag_sheets")
+@app.route("/diag_sheets")
 def diag_sheets():
     try:
-        rows = get_rows()
+        rows = sio.get_rows()
         preview = rows[:2] if rows else []
         return jsonify(ok=True, count=len(rows), preview=preview)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
 
-@app.route("/", methods=["GET"])
-def home():
-    return render_template("index.html", title="Izul Janjang Dashboard")
 
+# ================== AUTH ==================
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u = request.form.get("username", "")
-        p = request.form.get("password", "")
-        nxt = request.args.get("next") or url_for("dashboard")
+        u = request.form.get("username", "").strip()
+        p = request.form.get("password", "").strip()
         if u == APP_USER and p == APP_PASS:
             session["logged_in"] = True
+            nxt = request.args.get("next") or url_for("dashboard")
             return redirect(nxt)
-        return render_template("login.html", title="Izul Janjang Dashboard", error="Username/password salah.")
-    return render_template("login.html", title="Izul Janjang Dashboard")
+        return render_template("login.html", title=APP_TITLE, error="Username/Password salah.")
+    # GET
+    if session.get("logged_in"):
+        return redirect(url_for("dashboard"))
+    return render_template("login.html", title=APP_TITLE, error=None)
 
-@app.get("/logout")
+@app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
 
-@app.get("/dashboard")
+
+# ================== DASHBOARD ==================
+@app.route("/dashboard")
 def dashboard():
-    if not require_login():
-        return redirect(url_for("login", next=url_for("dashboard")))
+    if not session.get("logged_in"):
+        return redirect(url_for("login", next="/dashboard"))
 
-    # Ambil semua rows
-    rows = get_rows()
+    # Ambil daftar tanggal unik dari kolom COL_TANGGAL (desc)
+    dates = sio.get_unique_dates()  # [{'label': '10/8/2025', 'sortkey': date(...)}]
+    if not dates:
+        return render_template(
+            "dashboard.html",
+            title=APP_TITLE,
+            dates=[],
+            selected_date=None,
+            sections_order=SECTIONS_ORDER,
+            sections_table={s: [] for s in SECTIONS_ORDER},
+            sections_total={s: 0 for s in SECTIONS_ORDER},
+            day_total=0,
+            rows_compact=[],
+            message="Tidak ada data."
+        )
 
-    # Agregasi
-    per_tanggal, per_bulan, per_tahun, seksi_list = aggregate(rows)
+    # Pilihan tanggal (default = terbaru)
+    selected = request.args.get("date") or dates[0]["label"]
 
-    # Dropdown tanggal (pakai string asli dari sheet)
-    tanggal_opsi = unique_sorted_dates(rows)
-    if not tanggal_opsi:
-        return render_template("dashboard.html",
-                               title="Izul Janjang Dashboard",
-                               tanggal_options=[],
-                               tanggal_selected=None,
-                               seksi_list=[],
-                               tabel_data={},
-                               badges={},
-                               month_labels=[],
-                               month_series={},
-                               year_labels=[],
-                               year_series={},
-                               year_current=dt.date.today().year)
+    # Baris untuk hari terpilih
+    rows_today = sio.filter_rows_by_date(selected)
 
-    # Pilihan tanggal dari query (default terbaru)
-    tanggal_selected = request.args.get("date") or tanggal_opsi[0]
+    # ====== Build tabel (per seksi → daftar (nama, jumlah)) ======
+    sections_table = {s: [] for s in SECTIONS_ORDER}
+    # gunakan dict agregat nama->jumlah per seksi
+    agg = {s: defaultdict(int) for s in SECTIONS_ORDER}
+    day_total = 0
 
-    # Pilihan bulan/tahun (untuk grafik)
-    now = parse_date(tanggal_selected) or datetime.now()
-    month_q = int(request.args.get("month", now.month))
-    year_q_bulanan = int(request.args.get("y_m", now.year))
-    year_q_tahunan = int(request.args.get("y_y", now.year))
-
-    # Data harian (tabel & badges)
-    harian_map = per_tanggal.get(tanggal_selected, {})
-    # urutkan seksi supaya stabil
-    seksi_show = [s for s in seksi_list]
-
-    # Tabel per seksi -> list of (nama, total) per seksi
-    # (Di sheet kamu, “per orang” tidak diaggregasi di harian_map.
-    #  Untuk tabel nama-per-seksi di hari itu, kita hitung langsung dari rows.)
-    tabel_data = OrderedDict((s, []) for s in seksi_show)
-    for r in rows:
-        if r.get(COL_TANGGAL, "") != tanggal_selected:
+    for r in rows_today:
+        section = _section_of_row(r)
+        if not section:
             continue
-        s = normalize_section(r.get(COL_SEKSI, ""))
-        if s not in tabel_data:
-            tabel_data[s] = []
-        nama = (r.get(COL_NAMA, "") or "").strip()
-        try:
-            val = int(str(r.get(COL_JANJANG, 0)).strip())
-        except:
-            val = 0
-        if nama:
-            tabel_data[s].append((nama, val))
+        people = _people_counts_from_row(r)  # [(nama, jumlah), ...]
+        # total harian (semua seksi)
+        for _, v in people:
+            day_total += v
+        if section not in agg:
+            # seksi yang di sheet tidak ada di urutan default → buatkan slot
+            agg.setdefault(section, defaultdict(int))
+            sections_table.setdefault(section, [])
 
-    # Badges total per seksi + total semua
-    badges = OrderedDict()
-    total_all = 0
-    for s in seksi_show:
-        subtotal = int(harian_map.get(s, 0))
-        badges[s] = subtotal
-        total_all += subtotal
-    badges["_ALL_"] = total_all
+        for name, val in people:
+            agg[section][name] += val
 
-    # Grafik bulanan (labels harian kosong + spike via per_bulan; kita tampilkan total per bulan di tahunan)
-    month_labels, month_series = series_for_month(per_bulan, year_q_bulanan, month_q, seksi_show)
+    # Konversi ke list & total per seksi
+    sections_total = {}
+    for sec, mapping in agg.items():
+        # urutkan nama alfabet
+        items = sorted(mapping.items(), key=lambda x: x[0].lower())
+        sections_table[sec] = items
+        sections_total[sec] = sum(v for _, v in items)
 
-    # Grafik tahunan (12 bulan)
-    year_labels, year_series = series_for_year(per_bulan, per_tahun, year_q_tahunan, seksi_show)
+    # Pastikan seksi yang tidak ada datanya tetap ada di tabel
+    for s in SECTIONS_ORDER:
+        sections_table.setdefault(s, [])
+        sections_total.setdefault(s, 0)
+
+    # ====== Siapkan data kompak utk grafik (dari SELURUH rows) ======
+    all_rows = sio.get_rows()
+    rows_compact = []
+    for r in all_rows:
+        # tanggal ISO untuk JS (agar parsing konsisten)
+        lbl = r.get(COL_TANGGAL)
+        if lbl is None:
+            # fallback cari key setelah strip
+            k = next((k for k in r.keys() if k.strip() == COL_TANGGAL), None)
+            lbl = r.get(k, "")
+        d = _try_parse_date(str(lbl))
+        iso = d.isoformat() if d else None
+
+        sec = _section_of_row(r)
+        total_row = _sum_people_in_row(r)
+        rows_compact.append({
+            "date_iso": iso,
+            "section": sec,
+            "total": total_row
+        })
+
+    # Untuk filter grafik bulan & tahun di sisi klien
+    sd = _try_parse_date(selected)
+    selected_year  = sd.year if sd else date.today().year
+    selected_month = sd.month if sd else date.today().month
 
     return render_template(
         "dashboard.html",
-        title="Izul Janjang Dashboard",
-        tanggal_options=tanggal_opsi,
-        tanggal_selected=tanggal_selected,
-        seksi_list=seksi_show,
-        tabel_data=tabel_data,
-        badges=badges,
-        month_labels=month_labels,
-        month_series=month_series,
-        year_labels=year_labels,
-        year_series=year_series,
-        month_current=month_q,
-        year_current_month=year_q_bulanan,
-        year_current_year=year_q_tahunan,
+        title=APP_TITLE,
+        dates=dates,
+        selected_date=selected,
+        sections_order=SECTIONS_ORDER,
+        sections_table=sections_table,
+        sections_total=sections_total,
+        day_total=day_total,
+        rows_compact=rows_compact,
+        col_tanggal=COL_TANGGAL,
+        col_seksi=COL_SEKSI,
+        selected_year=selected_year,
+        selected_month=selected_month,
+        message=None if rows_today else "Tidak ada data untuk tanggal yang dipilih."
     )
 
+
+# ============== MINIMAL INDEX TEMPLATE FALLBACK ==============
+# (Jika kamu belum punya templates/index.html, render sederhana di sini)
+@app.route("/index-fallback")
+def index_fallback():
+    return f"{APP_TITLE} • Login di /login atau langsung /dashboard bila sudah login. Debug: /health, /diag_env, /diag_sheets"
+
+
 if __name__ == "__main__":
-    # for local test
+    # Dev run
     app.run(debug=True)
