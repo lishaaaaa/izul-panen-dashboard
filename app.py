@@ -1,355 +1,225 @@
-# app.py
-# Flask app untuk Vercel (@vercel/python). Entry di vercel.json -> api/index.py yang meng-import app ini.
-from __future__ import annotations
 import os
 import json
-from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime
 from functools import wraps
-from typing import Dict, List, Any, Iterable, Tuple
 
 from flask import (
-    Flask, render_template, request, session, redirect, url_for,
-    jsonify, abort
+    Flask, render_template, request, redirect,
+    url_for, session, jsonify, make_response
 )
 
-# ====== KONFIGURASI DASHBOARD ======
-APP_TITLE = "Izul Panen Dashboard"
+# --- App init & config ---
+app = Flask(__name__)
 
-# ENV (isi di Vercel → Settings → Environment Variables)
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
-ADMIN_USER = os.getenv("ADMIN_USER", "admin")
-ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
+# SECRET_KEY wajib ada untuk session
+app.secret_key = os.getenv("SECRET_KEY", "dev-secret-key")
 
-# ====== IMPORT LAYER SHEETS ======
-# Kita buat import yang "tahan banting" ke berbagai nama fungsi/konstanta di sheets_io.py
+# Cookie aman di Vercel (HTTPS); ketika run lokal, ini tetap aman
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=True,
+)
+
+TITLE = "Izul Janjang Dashboard"
+
+# --- ENV bindings (kolom & kredensial) ---
+APP_USER = (os.getenv("APP_USER") or "").strip()
+APP_PASS = (os.getenv("APP_PASS") or "").strip()
+
+SHEET_ID  = os.getenv("SHEET_ID", "")
+SHEET_TAB = os.getenv("SHEET_TAB", "Form Responses 1")
+
+COL_TANGGAL = os.getenv("COL_TANGGAL", "Tanggal")
+COL_SEKSI   = os.getenv("COL_SEKSI", "Seksi")
+COL_NAMA    = os.getenv("COL_NAMA", "Nama Pemanen")
+COL_JANJANG = os.getenv("COL_JANJANG", "Jumlah Janjang")
+DATE_ORDER  = (os.getenv("DATE_ORDER") or "dmy").lower()  # "dmy" | "mdy" | "ymd"
+
+# --- Sheets helper (menggunakan modul sheets_io milikmu) ---
+# Harus tersedia: get_rows() -> List[Dict]
 try:
-    import sheets_io as sio  # file lokal kamu
+    from sheets_io import get_rows  # kamu sudah punya file ini
+    HAS_SHEETS = True
 except Exception as e:
-    sio = None
-    print("WARNING: sheets_io tidak bisa diimport:", e)
+    HAS_SHEETS = False
+    _import_err = str(e)
+    def get_rows(*args, **kwargs):
+        raise RuntimeError("get_rows() belum tersedia: " + _import_err)
 
-def _col(name: str, default: str) -> str:
-    """Ambil nama kolom dari sheets_io bila ada, kalau tidak pakai default."""
-    return getattr(sio, name, default) if sio else default
-
-COL_TANGGAL = _col("COL_TANGGAL", "COL_TANGGAL")
-COL_NAMA    = _col("COL_NAMA",    "COL_NAMA")
-COL_JANJANG = _col("COL_JANJANG", "COL_JANJANG")
-COL_SEKSI   = _col("COL_SEKSI",   "COL_SEKSI")
-
-def _fetch_rows() -> List[Dict[str, Any]]:
-    """
-    Ambil baris dari Google Sheets lewat sheets_io.
-    Mencoba beberapa nama fungsi umum agar kompatibel dengan variasi implementasi.
-    """
-    if sio is None:
-        return []
-    for fn in ("get_rows", "get_sheet_rows", "fetch_rows", "load_rows", "read_rows"):
-        if hasattr(sio, fn):
-            rows = getattr(sio, fn)()
-            # Normalisasi: pastikan list[dict]
-            if isinstance(rows, list):
-                return rows
-    raise RuntimeError("Tidak menemukan fungsi pembaca data di sheets_io (coba sediakan get_rows()).")
-
-
-# ====== UTIL ======
-def parse_any_date(s: str | date | datetime) -> date | None:
-    """Parse berbagai format tanggal umum ke date()."""
-    if s is None:
+# --- Utilities ---
+def _parse_date(s: str) -> datetime | None:
+    """Parse tanggal dari string sesuai DATE_ORDER env. kembalikan None jika gagal."""
+    if not s:
         return None
-    if isinstance(s, date) and not isinstance(s, datetime):
-        return s
-    if isinstance(s, datetime):
-        return s.date()
-    t = str(s).strip()
-    if not t:
-        return None
-
-    # Coba beberapa pola umum
-    fmts = [
-        "%Y-%m-%d",    # 2025-10-08
-        "%Y/%m/%d",
-        "%m/%d/%Y",    # 10/08/2025 (US)
-        "%d/%m/%Y",    # 08/10/2025 (ID/EU)
-        "%-m/%-d/%Y",  # linux-friendly
-        "%-d/%-m/%Y",
-    ]
+    s = s.strip()
+    fmts = []
+    if DATE_ORDER == "dmy":
+        fmts = ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y"]
+    elif DATE_ORDER == "mdy":
+        fmts = ["%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%d/%m/%Y"]
+    else:  # ymd default
+        fmts = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"]
     for f in fmts:
         try:
-            return datetime.strptime(t, f).date()
-        except Exception:
-            pass
-
-    # Fallback: split heuristik
-    try:
-        parts = t.replace("-", "/").split("/")
-        parts = [p for p in parts if p]
-        if len(parts) == 3:
-            a, b, c = parts
-            if len(a) == 4:  # yyyy/mm/dd
-                return date(int(a), int(b), int(c))
-            # Tebak US (mm/dd/yyyy) jika a<=12
-            if int(a) <= 12:
-                return date(int(c), int(a), int(b))
-            # Else EU (dd/mm/yyyy)
-            return date(int(c), int(b), int(a))
-    except Exception:
-        pass
+            return datetime.strptime(s, f)
+        except ValueError:
+            continue
     return None
 
-
-def require_login(view):
+def login_required(view):
     @wraps(view)
-    def _wrap(*args, **kwargs):
-        if not session.get("authed"):
-            # kalau belum login, arahkan ke /login dan simpan next
-            return redirect(url_for("login", next=request.path))
+    def wrapped(*args, **kwargs):
+        if not session.get("auth"):
+            nxt = request.path if request.method == "GET" else url_for("dashboard")
+            return redirect(url_for("login", next=nxt))
         return view(*args, **kwargs)
-    return _wrap
+    return wrapped
 
-
-def rows_by_date(rows: Iterable[Dict[str, Any]], tanggal: date) -> List[Dict[str, Any]]:
-    out = []
-    for r in rows:
-        d = parse_any_date(r.get(COL_TANGGAL))
-        if d == tanggal:
-            out.append(r)
-    return out
-
-
-def sum_by_key(rows: Iterable[Dict[str, Any]], group_key: str) -> Dict[str, float]:
-    agg = defaultdict(float)
-    for r in rows:
-        name = str(r.get(group_key, "")).strip()
-        try:
-            val = float(str(r.get(COL_JANJANG, 0)).replace(",", "").strip() or 0)
-        except Exception:
-            val = 0.0
-        agg[name] += val
-    return dict(agg)
-
-
-def to_month_key(d: date) -> str:
-    return f"{d.year:04d}-{d.month:02d}"
-
-
-# ====== APLIKASI ======
-app = Flask(__name__, template_folder="templates", static_folder="static")
-app.secret_key = SECRET_KEY
-
-
-# ---------- Landing ----------
-@app.get("/")
-def home():
-    return render_template(
-        "index.html",
-        title=APP_TITLE,
-        debug_links=[("/health","health"), ("/diag_env","diag_env"), ("/diag_sheets","diag_sheets")]
-    )
-
-
-# ---------- Auth ----------
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        user = request.form.get("username", "")
-        pwd  = request.form.get("password", "")
-        if user == ADMIN_USER and pwd == ADMIN_PASS:
-            session["authed"] = True
-            nxt = request.args.get("next") or url_for("dashboard")
-            return redirect(nxt)
-        return render_template("login.html", title=APP_TITLE, error="Username atau password salah.")
-    return render_template("login.html", title=APP_TITLE, error=None)
-
-
-@app.get("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("home"))
-
-
-# ---------- Dashboard ----------
-@app.get("/dashboard")
-@require_login
-def dashboard():
-    """Render dashboard + kirim data agregat untuk tanggal yang dipilih."""
-    # Ambil semua baris
-    try:
-        all_rows = _fetch_rows()
-    except Exception as e:
-        return f"Gagal membaca data Sheets: {e}", 500
-
-    # Cari tanggal terbaru di data
-    all_dates = sorted({parse_any_date(r.get(COL_TANGGAL)) for r in all_rows if r.get(COL_TANGGAL)}, reverse=True)
-    latest = next((d for d in all_dates if d is not None), date.today())
-
-    # Ambil pilihan tanggal dari query (default: latest dari data)
-    q = request.args.get("tanggal", "")
-    picked_date = parse_any_date(q) or latest
-
-    # Data untuk tanggal yang dipilih
-    rows_today = rows_by_date(all_rows, picked_date)
-
-    # Total harian seluruh seksi
-    total_harian = 0.0
-    for r in rows_today:
-        try:
-            total_harian += float(str(r.get(COL_JANJANG, 0)).replace(",", "").strip() or 0)
-        except Exception:
-            pass
-
-    # Total per seksi (hari itu)
-    per_seksi_today = sum_by_key(rows_today, COL_SEKSI)
-
-    # Data tabel per seksi (kolom: COL_NAMA, COL_JANJANG)
-    tabel_per_seksi: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-    for r in rows_today:
-        seksi = str(r.get(COL_SEKSI, "")).strip()
-        nama  = str(r.get(COL_NAMA, "")).strip()
-        try:
-            val = float(str(r.get(COL_JANJANG, 0)).replace(",", "").strip() or 0)
-        except Exception:
-            val = 0.0
-        tabel_per_seksi[seksi].append((nama, val))
-
-    # Urutkan tabel nama pemanen per seksi (desc)
-    for sx, lst in tabel_per_seksi.items():
-        lst.sort(key=lambda x: x[0].lower())
-
-    # Dropdown bulan & tahun untuk grafik
-    # (default: bulan & tahun dari picked_date)
-    bulan_default = picked_date.month
-    tahun_default = picked_date.year
-
-    # Kumpulkan daftar seksi unik untuk loop di template
-    seksi_unik = sorted({str(r.get(COL_SEKSI, "")).strip() for r in all_rows if r.get(COL_SEKSI)})
-
-    return render_template(
-        "dashboard.html",
-        title=APP_TITLE,
-        tanggal_str=picked_date.isoformat(),
-        total_harian=total_harian,
-        per_seksi_today=per_seksi_today,
-        tabel_per_seksi=tabel_per_seksi,
-        seksi_unik=seksi_unik,
-        bulan_default=bulan_default,
-        tahun_default=tahun_default,
-        # Nama kolom untuk referensi di template/JS jika perlu
-        COL_TANGGAL=COL_TANGGAL,
-        COL_NAMA=COL_NAMA,
-        COL_JANJANG=COL_JANJANG,
-        COL_SEKSI=COL_SEKSI,
-    )
-
-
-# ---------- API untuk Grafik ----------
-@app.get("/api/sektion/<seksi>/monthly")
-@require_login
-def api_monthly(seksi: str):
-    """
-    Series harian untuk bulan & tahun tertentu pada seksi tertentu.
-    Param: month=1..12, year=YYYY
-    Output: { labels: [YYYY-MM-DD,...], data: [angka,...] }
-    """
-    month = int(request.args.get("month", "1"))
-    year  = int(request.args.get("year",  "1970"))
-
-    try:
-        all_rows = _fetch_rows()
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-    buckets: Dict[date, float] = defaultdict(float)
-    for r in all_rows:
-        d = parse_any_date(r.get(COL_TANGGAL))
-        if not d or d.year != year or d.month != month:
-            continue
-        if str(r.get(COL_SEKSI, "")).strip() != seksi:
-            continue
-        try:
-            val = float(str(r.get(COL_JANJANG, 0)).replace(",", "").strip() or 0)
-        except Exception:
-            val = 0.0
-        buckets[d] += val
-
-    labels = [dt.isoformat() for dt in sorted(buckets.keys())]
-    data   = [buckets[dt] for dt in sorted(buckets.keys())]
-    return jsonify({"ok": True, "labels": labels, "data": data})
-
-
-@app.get("/api/sektion/<seksi>/yearly")
-@require_login
-def api_yearly(seksi: str):
-    """
-    Series bulanan untuk tahun tertentu pada seksi tertentu.
-    Param: year=YYYY
-    Output: { labels: ["2025-01",...,"2025-12"], data: [angka bulanan] }
-    """
-    year = int(request.args.get("year", "1970"))
-
-    try:
-        all_rows = _fetch_rows()
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-    buckets: Dict[str, float] = defaultdict(float)  # key: YYYY-MM
-    for r in all_rows:
-        d = parse_any_date(r.get(COL_TANGGAL))
-        if not d or d.year != year:
-            continue
-        if str(r.get(COL_SEKSI, "")).strip() != seksi:
-            continue
-        try:
-            val = float(str(r.get(COL_JANJANG, 0)).replace(",", "").strip() or 0)
-        except Exception:
-            val = 0.0
-        buckets[to_month_key(d)] += val
-
-    # urutkan 12 bulan
-    labels = [f"{year:04d}-{m:02d}" for m in range(1, 13)]
-    data   = [buckets.get(lbl, 0.0) for lbl in labels]
-    return jsonify({"ok": True, "labels": labels, "data": data})
-
-
-# ---------- DIAG / HEALTH ----------
-@app.get("/health")
+# --- Diagnostics ---
+@app.route("/health")
 def health():
-    return jsonify({"ok": True, "ts": datetime.utcnow().isoformat()})
+    return {"ok": True, "app": "izul-janjiang-dashboard"}
 
-
-@app.get("/diag_env")
+@app.route("/diag_env")
 def diag_env():
-    return jsonify({
-        "ok": True,
-        "has_sheets_io": sio is not None,
+    data = {
         "cols": {
-            "COL_TANGGAL": COL_TANGGAL,
-            "COL_NAMA": COL_NAMA,
             "COL_JANJANG": COL_JANJANG,
+            "COL_NAMA": COL_NAMA,
             "COL_SEKSI": COL_SEKSI,
+            "COL_TANGGAL": COL_TANGGAL,
         },
         "env": {
-            "ADMIN_USER": bool(ADMIN_USER),
-            "ADMIN_PASS": bool(ADMIN_PASS),
-            "SECRET_KEY": bool(SECRET_KEY),
-            # jangan bocorkan nilai env
-        }
-    })
+            "ADMIN_USER": bool(APP_USER),
+            "ADMIN_PASS": bool(APP_PASS),
+            "SECRET_KEY": bool(app.secret_key),
+        },
+        "has_sheets_io": HAS_SHEETS,
+        "ok": True
+    }
+    return jsonify(data)
 
-
-@app.get("/diag_sheets")
+@app.route("/diag_sheets")
 def diag_sheets():
+    if not HAS_SHEETS:
+        return jsonify({"ok": False, "error": "Fungsi get_rows() tidak tersedia di sheets_io."})
+
+    if not SHEET_ID:
+        return jsonify({"ok": False, "error": "ENV SHEET_ID belum diisi."})
+
     try:
-        rows = _fetch_rows()
-        preview = rows[:5]
+        rows = get_rows(SHEET_ID, SHEET_TAB)
+        preview = rows[:3]
         return jsonify({"ok": True, "count": len(rows), "preview": preview})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": str(e)})
 
+@app.route("/test_auth")
+def test_auth():
+    return {"auth": bool(session.get("auth"))}
 
-# ---------- DEV LOCAL ----------
+# --- Home / Landing ---
+@app.route("/")
+def index():
+    # Halaman landing yang simpel; tombol ke /login & /dashboard biasanya ada di index.html kamu
+    # Jika kamu tidak punya index.html, fallback text sederhana:
+    try:
+        return render_template("index.html", title=TITLE)
+    except Exception:
+        return (
+            f"{TITLE} — Login via /login atau langsung /dashboard bila sudah login. "
+            f"Debug: /health, /diag_env, /diag_sheets"
+        )
+
+# --- Auth ---
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    # Jika sudah login, langsung ke tujuan
+    if session.get("auth"):
+        target = request.args.get("next") or url_for("dashboard")
+        return redirect(target)
+
+    error = None
+    if request.method == "POST":
+        u = (request.form.get("username") or "").strip()
+        p = (request.form.get("password") or "").strip()
+        if APP_USER and APP_PASS and u == APP_USER and p == APP_PASS:
+            session["auth"] = True
+            target = request.args.get("next") or url_for("dashboard")
+            return redirect(target)
+        else:
+            error = "Username atau password salah."
+
+    return render_template("login.html", title=TITLE, error=error)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+# --- Dashboard ---
+def _load_all_rows():
+    """Ambil seluruh data dari Google Sheets."""
+    if not HAS_SHEETS:
+        return []
+    rows = get_rows(SHEET_ID, SHEET_TAB)
+    return rows
+
+def _normalize_rows(rows):
+    """Tambahkan kolom tanggal_parsed untuk memudahkan filter."""
+    out = []
+    for r in rows:
+        # Ambil tanggal dari kolom environment
+        tgl = r.get(COL_TANGGAL, "") if isinstance(r, dict) else ""
+        dt = _parse_date(str(tgl))
+        r2 = dict(r)
+        r2["_tanggal_parsed"] = dt
+        out.append(r2)
+    return out
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    """
+    Dashboard menampilkan data + title.
+    Kamu sudah punya 'templates/dashboard.html' — kita hanya kirim title dan data dasar.
+    """
+    rows = []
+    try:
+        rows = _normalize_rows(_load_all_rows())
+    except Exception as e:
+        # Tampilkan template dengan pesan error ringan
+        return render_template(
+            "dashboard.html",
+            title=TITLE,
+            error=str(e),
+            rows=[],
+        )
+
+    # Filter per tanggal (opsional) -> ?date=YYYY-MM-DD
+    qdate = request.args.get("date", "").strip()
+    if qdate:
+        try:
+            target = datetime.strptime(qdate, "%Y-%m-%d").date()
+            rows = [r for r in rows if r.get("_tanggal_parsed") and r["_tanggal_parsed"].date() == target]
+        except ValueError:
+            # Abaikan jika format salah
+            pass
+
+    # Kirim variabel umum yang aman untuk template-mu
+    ctx = {
+        "title": TITLE,
+        "rows": rows,
+        "cols": {
+            "tanggal": COL_TANGGAL,
+            "seksi": COL_SEKSI,
+            "nama": COL_NAMA,
+            "janjang": COL_JANJANG,
+        },
+    }
+    return render_template("dashboard.html", **ctx)
+
+# --- Local run ---
 if __name__ == "__main__":
-    # Jalankan lokal
+    # Jalankan lokal: FLASK_ENV=development python app.py
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
