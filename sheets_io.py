@@ -1,105 +1,101 @@
 # sheets_io.py
-# --------------------------------------------
-# Util baca Google Sheets untuk Izul Janjang Dashboard
-# Memerlukan ENV:
-# - SHEET_ID                -> ID Google Sheet
-# - SHEET_TAB               -> Nama worksheet (tab), mis. "Form Responses 1"
-# - GOOGLE_SERVICE_ACCOUNT  -> JSON string service account (direkomendasikan)
-#   ATAU GOOGLE_SERVICE_ACCOUNT_JSON -> alias kalau variabel di atas beda nama
-#
-# Output utama:
-# - get_rows() -> list[dict] dengan kunci sesuai kolom yang dipakai app
-# --------------------------------------------
-
-import json
-import os
-from typing import List, Dict, Any, Optional
-
+import os, json
+from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ==== Konstanta kolom yang dipakai app (samakan dgn header di Sheet Anda) ====
-COL_TANGGAL = "Tanggal"
-COL_SEKSI   = "Seksi"
-COL_NAMA    = "Nama Pemanen"
-COL_JANJANG = "Jumlah Janjang"
+# ===== ENV =====
+SHEET_ID   = os.getenv("SHEET_ID", "").strip()
+SHEET_TAB  = os.getenv("SHEET_TAB", "").strip() or "Form_Responses 1"
+COL_TANGGAL= os.getenv("COL_TANGGAL", "Hari Tanggal Hari ini").strip()
 
-# Ekspor juga biar bisa di-import di app.py
-__all__ = [
-    "COL_TANGGAL", "COL_SEKSI", "COL_NAMA", "COL_JANJANG",
-    "get_rows"
+REQ_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# ==== Helper auth & worksheet ====
-
-def _service_account_info() -> Dict[str, Any]:
-    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT") or os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not raw:
-        raise RuntimeError("ENV GOOGLE_SERVICE_ACCOUNT (JSON) tidak ditemukan.")
-    try:
-        return json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(f"GOOGLE_SERVICE_ACCOUNT bukan JSON valid: {e}")
-
+# ===== CORE =====
 def _client():
-    info = _service_account_info()
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
+    raw = os.getenv("GOOGLE_CREDENTIALS_JSON") or os.getenv("GOOGLE_SERVICE_ACCOUNT") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if not raw:
+        raise RuntimeError("ENV GOOGLE_CREDENTIALS_JSON tidak ada")
+    info = json.loads(raw)
+    creds = Credentials.from_service_account_info(info, scopes=REQ_SCOPES)
+    gc = gspread.authorize(creds)
+    return gc
 
-def _worksheet():
-    sheet_id = os.getenv("SHEET_ID")
-    sheet_tab = os.getenv("SHEET_TAB")
-    if not sheet_id:
-        raise RuntimeError("ENV SHEET_ID tidak di-set.")
-    if not sheet_tab:
-        raise RuntimeError("ENV SHEET_TAB tidak di-set.")
+def _ws():
+    if not SHEET_ID:
+        raise RuntimeError("ENV SHEET_ID kosong")
     gc = _client()
-    sh = gc.open_by_key(sheet_id)
-    return sh.worksheet(sheet_tab)
-
-# ==== Fungsi utama yang dibutuhkan app ====
-
-def get_rows() -> List[Dict[str, Any]]:
-    """
-    Mengembalikan semua baris sebagai list of dict.
-    Dict kunci-nya berasal dari header baris pertama di worksheet.
-    Wajib ada kolom: COL_TANGGAL, COL_SEKSI, COL_NAMA, COL_JANJANG.
-    """
-    ws = _worksheet()
-
-    # Gunakan get_all_records untuk langsung dapat list[dict]
-    records: List[Dict[str, Any]] = ws.get_all_records()
-
-    # Normalisasi kunci jika ada spasi/variasi (opsional tapi membantu)
-    def norm_key(k: str) -> str:
-        return (k or "").strip()
-
-    normalized: List[Dict[str, Any]] = []
-    for rec in records:
-        rec2 = {norm_key(k): v for k, v in rec.items()}
-        # pastikan kunci minimal ada; kalau tidak, tetap masukkan biar bisa dilihat di diag
-        normalized.append(rec2)
-
-    return normalized
-
-# ====== (Opsional) util cepat untuk diag ======
-
-def sheet_meta() -> Dict[str, Any]:
-    """Info ringan untuk endpoint /diag_sheets."""
+    sh = gc.open_by_key(SHEET_ID)
     try:
-        ws = _worksheet()
-        headers = ws.row_values(1)
-        return {
-            "ok": True,
-            "sheet_id": os.getenv("SHEET_ID"),
-            "sheet_tab": os.getenv("SHEET_TAB"),
-            "headers": headers,
-            "rows_count": ws.row_count,
-            "cols_count": ws.col_count,
-        }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return sh.worksheet(SHEET_TAB)
+    except Exception:
+        # fallback: nama tab default Google Form
+        return sh.worksheet("Form Responses 1")
+
+def get_rows():
+    """Return list of dicts (header -> value), kosongin baris tanpa tanggal."""
+    ws = _ws()
+    rows = ws.get_all_records(numericise_ignore=["all"])
+    out = []
+    for r in rows:
+        # jaga-jaga key beda kapital/spasi
+        keys_norm = {k.strip(): k for k in r.keys()}
+        col = keys_norm.get(COL_TANGGAL, None)
+        val = r.get(col, "") if col else r.get(COL_TANGGAL, "")
+        if str(val).strip():
+            out.append(r)
+    return out
+
+# ===== Date helpers =====
+_FMT_CANDIDATES = ["%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d %m %Y"]
+
+def _try_parse_date(s: str):
+    s = str(s).strip()
+    for fmt in _FMT_CANDIDATES:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            pass
+    return None
+
+def get_unique_dates():
+    """
+    Ambil daftar tanggal unik dari kolom COL_TANGGAL.
+    Return: list of dict [{label: "10/8/2025", sortkey: date(2025,10,8)}] urut desc.
+    """
+    rows = get_rows()
+    seen = {}
+    for r in rows:
+        # akses robust untuk kolom tanggal
+        val = r.get(COL_TANGGAL)
+        if val is None:
+            # fallback cari key yang sama persis setelah strip
+            k = next((k for k in r.keys() if k.strip() == COL_TANGGAL), None)
+            val = r.get(k, "")
+        if not str(val).strip():
+            continue
+        d = _try_parse_date(str(val))
+        # simpan label asli agar sama persis dengan isi sheet
+        if d:
+            seen[str(val).strip()] = d
+    items = [{"label": k, "sortkey": v} for k, v in seen.items()]
+    items.sort(key=lambda x: x["sortkey"], reverse=True)
+    return items
+
+def filter_rows_by_date(date_label: str):
+    """Filter baris untuk tanggal exact-match sesuai label di sheet."""
+    if not date_label:
+        return []
+    target = str(date_label).strip()
+    out = []
+    for r in get_rows():
+        val = r.get(COL_TANGGAL)
+        if val is None:
+            k = next((k for k in r.keys() if k.strip() == COL_TANGGAL), None)
+            val = r.get(k, "")
+        if str(val).strip() == target:
+            out.append(r)
+    return out
