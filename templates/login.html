@@ -2,46 +2,45 @@
 <html lang="id">
 <head>
   <meta charset="utf-8">
-  <title>{{ title }}</title>
+  <title>{{ title or "Izul Janjang Dashboard" }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
-    .wrap { max-width: 720px; margin: 0 auto; }
-    h1 { margin: 0 0 16px }
-    .card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; background: #fff; max-width: 420px; }
-    label { display:block; margin: 10px 0 4px; font-weight:600; }
-    input { width:100%; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; }
-    button { margin-top: 14px; padding:10px 14px; border:0; border-radius: 8px; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; }
-    .err { color:#b91c1c; margin: 10px 0; }
-    .nav { margin-top: 16px; font-size: 14px; }
-    a { color:#2563eb; text-decoration:none }
-    a:hover { text-decoration:underline }
+    body{font-family:system-ui, Arial, sans-serif; margin:24px;}
+    .topbar{display:flex;justify-content:space-between;align-items:center;}
+    .card{border:1px solid #e6e6e6;border-radius:12px;padding:16px;max-width:380px;}
+    .btn{padding:.6rem 1rem;border-radius:8px;border:1px solid #ccc;background:#f7f7f7;cursor:pointer}
+    .btn-primary{background:#0d6efd;border-color:#0d6efd;color:#fff}
+    .err{background:#fff3cd;border:1px solid #ffeeba;padding:10px;border-radius:8px;margin-bottom:12px;}
+    label{display:block;margin:.5rem 0 .25rem;}
+    input[type=text],input[type=password]{width:100%;padding:.55rem;border:1px solid #ccc;border-radius:8px;}
+    .links a{margin-right:12px; font-size:14px;}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>{{ title }}</h1>
-
-    {% if error %}
-      <div class="err">{{ error }}</div>
-    {% endif %}
-
-    <div class="card">
-      <form method="post" action="/login">
-        <input type="hidden" name="next" value="{{ request.args.get('next','') }}">
-        <label>Username</label>
-        <input name="username" autocomplete="username" required>
-
-        <label>Password</label>
-        <input name="password" type="password" autocomplete="current-password" required>
-
-        <button type="submit">Masuk</button>
-      </form>
+  <div class="topbar">
+    <h2>{{ title or "Izul Janjang Dashboard" }}</h2>
+    <div class="links">
+      <a href="{{ url_for('health') }}">health</a>
+      <a href="{{ url_for('diag_env') }}">diag_env</a>
+      <a href="{{ url_for('diag_sheets') }}">diag_sheets</a>
     </div>
+  </div>
 
-    <div class="nav">
-      Debug: <a href="/health">health</a> • <a href="/diag_env">diag_env</a> • <a href="/diag_sheets">diag_sheets</a>
-    </div>
+  {% if error %}
+    <div class="err">{{ error }}</div>
+  {% endif %}
+
+  <div class="card">
+    <h3>Login</h3>
+    <form method="post" action="{{ url_for('login', next=request.args.get('next')) }}">
+      <label>Username</label>
+      <input type="text" name="username" value="admin" autocomplete="username">
+      <label>Password</label>
+      <input type="password" name="password" value="" autocomplete="current-password">
+      <div style="margin-top:12px;">
+        <button class="btn btn-primary" type="submit">Masuk</button>
+      </div>
+    </form>
   </div>
 </body>
 </html>
